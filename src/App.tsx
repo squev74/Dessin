@@ -52,6 +52,7 @@ import {
   DrawingPrompt,
   INITIAL_CURATED_PROMPTS,
 } from "./utils/curatedPrompts";
+import { generatePromptsClientSide } from "./utils/geminiClient";
 
 type AppRole = "user" | "admin";
 
@@ -617,30 +618,31 @@ export function App() {
     const themeToUse = selectedTheme === "custom" && customThemeInput.trim() ? customThemeInput.trim() : selectedTheme;
 
     try {
-      const res = await fetch("/api/prompts/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ count: 6, theme: themeToUse }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "Erreur de génération.");
-
-      if (Array.isArray(data) && data.length > 0) {
-        const newPrompts: DrawingPrompt[] = data.map((d: any, idx: number) => ({
-          id: `prompt-${Date.now()}-${idx}`,
-          orderIndex: prompts.length + idx + 1,
-          title: d.title,
-          category: d.category,
-          difficulty: d.difficulty,
-        }));
-        for (const p of newPrompts) {
-          await setDoc(doc(db, "prompts", p.id), p);
+      // For static GitHub Pages, we prompt user for API key or use local environment / localStorage
+      let apiKey = import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem("artguard_gemini_key");
+      if (!apiKey) {
+        apiKey = prompt("Veuillez entrer votre clé API Gemini (pour la génération des sujets) :") || "";
+        if (apiKey) {
+          localStorage.setItem("artguard_gemini_key", apiKey);
+        } else {
+          throw new Error("Clé API Gemini requise.");
         }
-        setPrompts((prev) => [...prev, ...newPrompts]);
       }
+
+      const newPrompts = await generatePromptsClientSide(apiKey, 6, themeToUse);
+      const reindexed = newPrompts.map((p, idx) => ({
+        ...p,
+        orderIndex: prompts.length + idx + 1,
+      }));
+
+      for (const p of reindexed) {
+        await setDoc(doc(db, "prompts", p.id), p);
+      }
+      setPrompts((prev) => [...prev, ...reindexed]);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : "Erreur inattendue.";
       setPromptError(msg);
+      alert(msg);
     } finally {
       setIsGeneratingPrompts(false);
     }
