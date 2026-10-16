@@ -1,0 +1,8 @@
+{
+  "name": "ArtGuard AI",
+  "description": "Automated moderation tool ensuring creative drawings remain safe, anonymous, and appropriate for all community members.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

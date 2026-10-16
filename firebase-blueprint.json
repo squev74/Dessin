@@ -1,0 +1,60 @@
+{
+  "entities": {
+    "Prompt": {
+      "title": "Prompt",
+      "description": "Sequential drawing prompt in the atelier",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "orderIndex": { "type": "integer" },
+        "title": { "type": "string", "maxLength": 200 },
+        "category": { "type": "string", "enum": ["imagination", "observation", "technique", "poetique"] },
+        "difficulty": { "type": "string", "enum": ["facile", "moyen"] }
+      },
+      "required": ["id", "orderIndex", "title", "category", "difficulty"]
+    },
+    "Submission": {
+      "title": "Submission",
+      "description": "User drawing submission for a specific prompt",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "promptId": { "type": "string", "maxLength": 128 },
+        "userId": { "type": "string", "maxLength": 128 },
+        "userEmail": { "type": "string", "maxLength": 128 },
+        "imageDataUrl": { "type": "string", "maxLength": 1048576 },
+        "status": { "type": "string", "enum": ["PENDING", "APPROVED", "REJECTED"] },
+        "reason": { "type": "string", "maxLength": 500 },
+        "isHandDrawn": { "type": "boolean" },
+        "altText": { "type": "string", "maxLength": 500 },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "promptId", "userId", "status", "isHandDrawn", "altText", "createdAt"]
+    },
+    "UserProgress": {
+      "title": "UserProgress",
+      "description": "Tracks unlocked prompts per user",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "maxLength": 128 },
+        "highestUnlockedIndex": { "type": "integer" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["userId", "highestUnlockedIndex", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/prompts/{promptId}": {
+      "schema": "Prompt",
+      "description": "Sequential prompts list"
+    },
+    "/submissions/{submissionId}": {
+      "schema": "Submission",
+      "description": "Drawing submissions partitioned by promptId"
+    },
+    "/user_progress/{userId}": {
+      "schema": "UserProgress",
+      "description": "User progress tracking highest unlocked prompt index"
+    }
+  }
+}
