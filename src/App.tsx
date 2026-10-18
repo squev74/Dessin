@@ -26,6 +26,9 @@ import {
   ZoomIn,
   ZoomOut,
   X,
+  Users,
+  Key,
+  FolderPlus,
 } from "lucide-react";
 import {
   auth,
@@ -51,10 +54,35 @@ import {
 import {
   DrawingPrompt,
   INITIAL_CURATED_PROMPTS,
+  THEME_PRESETS,
 } from "./utils/curatedPrompts";
 import { generatePromptsClientSide } from "./utils/geminiClient";
 
-type AppRole = "user" | "admin";
+interface Challenge {
+  id: string;
+  title: string;
+  description: string;
+  creator_id: string;
+  creator_name: string;
+  is_public: boolean;
+  invite_code?: string;
+  is_open?: boolean;
+  max_participants?: number;
+  participants?: string[];
+  created_at?: any;
+}
+
+interface DrawingSubmission {
+  id: string;
+  challenge_id: string;
+  prompt_id: string;
+  user_id: string;
+  storage_path: string;
+  image_url: string;
+  status: "PENDING" | "APPROVED" | "REJECTED";
+  rejection_reason?: string | null;
+  created_at?: any;
+}
 
 const PALETTE = [
   { name: "Fusain Noir", hex: "#1C1917" },
@@ -65,24 +93,30 @@ const PALETTE = [
   { name: "Violet Doux", hex: "#7C3AED" },
 ];
 
-interface DrawingSubmission {
-  id: string;
-  prompt_id: string;
-  user_id: string;
-  storage_path: string;
-  image_url: string;
-  status: "PENDING" | "APPROVED" | "REJECTED";
-  rejection_reason?: string | null;
-  created_at?: any;
-}
-
 export function App() {
   const [currentUser, setCurrentUser] = useState<FirebaseUser | null>(null);
   const [authLoading, setAuthLoading] = useState<boolean>(true);
-  const [userRole, setUserRole] = useState<AppRole>("user");
-  const [activeAdminTab, setActiveAdminTab] = useState<"atelier" | "moderation" | "prompts">("atelier");
+  const [userProfile, setUserProfile] = useState<{ joinedChallenges?: string[] } | null>(null);
 
-  // Prompts & Sequential progression
+  // Challenges State
+  const [challenges, setChallenges] = useState<Challenge[]>([]);
+  const [activeChallenge, setActiveChallenge] = useState<Challenge | null>(null);
+  const [activeTab, setActiveTab] = useState<"atelier" | "moderation" | "prompts">("atelier");
+
+  // Create Challenge Modal
+  const [showCreateChallengeModal, setShowCreateChallengeModal] = useState<boolean>(false);
+  const [newChallengeTitle, setNewChallengeTitle] = useState<string>("");
+  const [newChallengeDesc, setNewChallengeDesc] = useState<string>("");
+  const [newChallengeIsPublic, setNewChallengeIsPublic] = useState<boolean>(true);
+  const [newChallengeCode, setNewChallengeCode] = useState<string>("");
+  const [newChallengeMaxParticipants, setNewChallengeMaxParticipants] = useState<number>(50);
+  const [challengeToDelete, setChallengeToDelete] = useState<Challenge | null>(null);
+
+  // Join Private Challenge State
+  const [joinCodeInput, setJoinCodeInput] = useState<string>("");
+  const [joinError, setJoinError] = useState<string | null>(null);
+
+  // Prompts & Sequential progression for active challenge
   const [prompts, setPrompts] = useState<DrawingPrompt[]>([]);
   const [activePromptIndex, setActivePromptIndex] = useState<number>(0);
   const [userSubmissionsMap, setUserSubmissionsMap] = useState<Record<string, DrawingSubmission>>({});
@@ -96,130 +130,307 @@ export function App() {
   const [tool, setTool] = useState<"pen" | "watercolor" | "eraser">("pen");
   const [history, setHistory] = useState<string[]>([]);
 
-  // Imported image preview state (Replaces canvas when file is imported)
+  // Imported image preview state
   const [importedImageUrl, setImportedImageUrl] = useState<string | null>(null);
 
   // Submission state
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
 
-  // Gallery (cloistered per prompt)
+  // Gallery for active prompt
   const [galleryDrawings, setGalleryDrawings] = useState<Array<{ id: string; imageUrl: string; userId: string; submissionId: string }>>([]);
   const [galleryLoading, setGalleryLoading] = useState<boolean>(false);
 
-  // Lightbox & Touch Zoom state
+  // Lightbox & Zoom state
   const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
   const [zoomScale, setZoomScale] = useState<number>(1);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDraggingImage, setIsDraggingImage] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
 
-  // Admin Pending Submissions list
+  // Creator Moderation Pending Submissions
   const [pendingSubmissions, setPendingSubmissions] = useState<DrawingSubmission[]>([]);
   const [rejectingSubId, setRejectingSubId] = useState<string | null>(null);
   const [rejectionReasonInput, setRejectionReasonInput] = useState<string>("");
 
-  // Admin Prompt CRUD state
-  const [editingPrompt, setEditingPrompt] = useState<DrawingPrompt | null>(null);
+  // Creator Prompt CRUD state
+  const [editingPrompt, setEditingPrompt] = useState<(DrawingPrompt & { challenge_id?: string }) | null>(null);
   const [promptTitleInput, setPromptTitleInput] = useState<string>("");
   const [promptCategoryInput, setPromptCategoryInput] = useState<DrawingPrompt["category"]>("imagination");
   const [promptDifficultyInput, setPromptDifficultyInput] = useState<DrawingPrompt["difficulty"]>("facile");
 
-  // Admin Retraction Modal state
+  // Creator Retraction Modal state
   const [retractingDrawing, setRetractingDrawing] = useState<{ id: string; promptId: string; userId: string } | null>(null);
   const [retractionReasonInput, setRetractionReasonInput] = useState<string>("");
 
-  // Art Director generator state
+  // AI Prompt Generator state
   const [isGeneratingPrompts, setIsGeneratingPrompts] = useState<boolean>(false);
   const [selectedTheme, setSelectedTheme] = useState<string>("libre");
   const [customThemeInput, setCustomThemeInput] = useState<string>("");
   const [promptError, setPromptError] = useState<string | null>(null);
-  const [copiedJson, setCopiedJson] = useState<boolean>(false);
 
-  // Initialize Auth listener & Firestore data
+  const generateUniqueCode = () => {
+    const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let code = "ART-";
+    for (let i = 0; i < 4; i++) {
+      code += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    return code;
+  };
+
+  const joinChallenge = async (challenge: Challenge) => {
+    if (!currentUser) return;
+
+    if (challenge.is_open === false && challenge.creator_id !== currentUser.uid) {
+      alert("Ce challenge est actuellement fermé par son créateur.");
+      return;
+    }
+
+    const participants = challenge.participants || [];
+    if (challenge.is_public && !participants.includes(currentUser.uid)) {
+      const maxP = challenge.max_participants || 50;
+      if (participants.length >= maxP) {
+        alert(`Ce challenge public a atteint sa limite maximale de participants (${maxP}).`);
+        return;
+      }
+    }
+
+    const updatedParticipants = participants.includes(currentUser.uid) ? participants : [...participants, currentUser.uid];
+    const challRef = doc(db, "challenges", challenge.id);
+    try {
+      await updateDoc(challRef, { participants: updatedParticipants });
+    } catch {
+      await setDoc(challRef, { participants: updatedParticipants }, { merge: true });
+    }
+
+    const currentJoined = userProfile?.joinedChallenges || [];
+    if (!currentJoined.includes(challenge.id)) {
+      const updatedJoined = [...currentJoined, challenge.id];
+      const userDocRef = doc(db, "users", currentUser.uid);
+      try {
+        await updateDoc(userDocRef, { joinedChallenges: updatedJoined });
+      } catch {
+        await setDoc(userDocRef, { joinedChallenges: updatedJoined }, { merge: true });
+      }
+      setUserProfile((prev) => ({ ...(prev || {}), joinedChallenges: updatedJoined }));
+    }
+
+    const updatedChallenge = { ...challenge, participants: updatedParticipants };
+    setChallenges((prev) => prev.map((c) => c.id === challenge.id ? updatedChallenge : c));
+    setActiveChallenge(updatedChallenge);
+  };
+
+  const toggleChallengeOpen = async (challenge: Challenge, e: React.MouseEvent) => {
+    e.stopPropagation();
+    const newOpen = challenge.is_open === false ? true : false;
+    const challRef = doc(db, "challenges", challenge.id);
+    try {
+      await updateDoc(challRef, { is_open: newOpen });
+      setChallenges((prev) => prev.map((c) => c.id === challenge.id ? { ...c, is_open: newOpen } : c));
+      if (activeChallenge?.id === challenge.id) {
+        setActiveChallenge((prev) => prev ? { ...prev, is_open: newOpen } : null);
+      }
+    } catch (err) {
+      console.error("Error toggling challenge status:", err);
+    }
+  };
+
+  const deleteChallenge = (challenge: Challenge, e: React.MouseEvent) => {
+    e.stopPropagation();
+    setChallengeToDelete(challenge);
+  };
+
+  const confirmDeleteChallenge = async () => {
+    if (!challengeToDelete) return;
+    const challengeId = challengeToDelete.id;
+
+    try {
+      // 1. Delete drawings
+      const drawingsQ = query(collection(db, "drawings"), where("challenge_id", "==", challengeId));
+      const drawingsSnap = await getDocs(drawingsQ);
+      for (const dSnap of drawingsSnap.docs) {
+        await deleteDoc(doc(db, "drawings", dSnap.id));
+      }
+
+      // 2. Delete prompts
+      const promptsQ = query(collection(db, "prompts"), where("challenge_id", "==", challengeId));
+      const promptsSnap = await getDocs(promptsQ);
+      for (const pSnap of promptsSnap.docs) {
+        await deleteDoc(doc(db, "prompts", pSnap.id));
+      }
+
+      // 3. Delete challenge doc
+      await deleteDoc(doc(db, "challenges", challengeId));
+
+      // 4. Update local state so it is no longer displayed
+      setChallenges((prev) => prev.filter((c) => c.id !== challengeId));
+      if (activeChallenge?.id === challengeId) {
+        setActiveChallenge(null);
+      }
+      setChallengeToDelete(null);
+    } catch (err) {
+      console.error("Error deleting challenge:", err);
+      alert("Erreur lors de la suppression du challenge de la base de données.");
+    }
+  };
+
+  // Initialize Auth & Load Challenges
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
       if (user) {
+        // Ensure user doc
         const userDocRef = doc(db, "users", user.uid);
         const userSnap = await getDoc(userDocRef);
-        let role: AppRole = "user";
-        if (user.email === "squeva11@gmail.com") {
-          role = "admin";
-        } else if (userSnap.exists() && userSnap.data()?.role === "admin") {
-          role = "admin";
-        }
-
+        let profileData: any = {};
         if (!userSnap.exists()) {
-          await setDoc(userDocRef, {
+          profileData = {
             email: user.email,
             displayName: user.displayName,
-            role,
+            joinedChallenges: [],
             createdAt: serverTimestamp(),
-          });
+          };
+          await setDoc(userDocRef, profileData);
+        } else {
+          profileData = userSnap.data();
         }
-        setUserRole(role);
-        await loadAppData(user.uid, role);
-      } else {
-        setUserRole("user");
+        setUserProfile(profileData);
+        await loadChallenges();
       }
       setAuthLoading(false);
     });
     return () => unsub();
   }, []);
 
-  const loadAppData = async (uid: string, role: AppRole) => {
+  const loadChallenges = async () => {
     try {
-      const promptsSnap = await getDocs(collection(db, "prompts"));
-      let loadedPrompts: DrawingPrompt[] = [];
-      if (promptsSnap.empty) {
-        loadedPrompts = INITIAL_CURATED_PROMPTS.map((p, idx) => ({
-          id: `prompt-${idx + 1}`,
-          orderIndex: idx + 1,
-          title: p.title,
-          category: p.category,
-          difficulty: p.difficulty,
-        }));
-        for (const p of loadedPrompts) {
-          await setDoc(doc(db, "prompts", p.id), p);
-        }
-      } else {
-        promptsSnap.forEach((d) => {
-          loadedPrompts.push(d.data() as DrawingPrompt);
-        });
-        loadedPrompts.sort((a, b) => a.orderIndex - b.orderIndex);
-      }
-      setPrompts(loadedPrompts);
-
-      const subSnap = await getDocs(
-        query(collection(db, "drawings"), where("user_id", "==", uid))
-      );
-      const subMap: Record<string, DrawingSubmission> = {};
-      subSnap.forEach((d) => {
-        const data = d.data() as DrawingSubmission;
-        subMap[data.prompt_id] = { id: d.id, ...data };
+      const snap = await getDocs(collection(db, "challenges"));
+      let loaded: Challenge[] = [];
+      snap.forEach((d) => {
+        loaded.push({ id: d.id, ...(d.data() as any) });
       });
-      setUserSubmissionsMap(subMap);
 
-      if (role === "admin") {
-        await loadPendingSubmissions();
+      // If no challenges exist, create a default "Challenge Initial"
+      if (loaded.length === 0) {
+        const defaultChallId = `challenge-initial-${Date.now()}`;
+        const defaultChall: Challenge = {
+          id: defaultChallId,
+          title: "Challenge Initial & Rétrofit",
+          description: "Atelier collectif par défaut pour tous les sujets et dessins initiaux.",
+          creator_id: currentUser?.uid || "system",
+          creator_name: currentUser?.displayName || "Créateur",
+          is_public: true,
+          created_at: serverTimestamp(),
+        };
+        await setDoc(doc(db, "challenges", defaultChallId), defaultChall);
+        loaded = [defaultChall];
+
+        // Migrate any orphan prompts / drawings
+        const promptsSnap = await getDocs(collection(db, "prompts"));
+        for (const pd of promptsSnap.docs) {
+          const pData = pd.data();
+          if (!pData.challenge_id) {
+            await updateDoc(doc(db, "prompts", pd.id), { challenge_id: defaultChallId });
+          }
+        }
+        const drawingsSnap = await getDocs(collection(db, "drawings"));
+        for (const dd of drawingsSnap.docs) {
+          const dData = dd.data();
+          if (!dData.challenge_id) {
+            await updateDoc(doc(db, "drawings", dd.id), { challenge_id: defaultChallId });
+          }
+        }
       }
+
+      setChallenges(loaded);
     } catch (err) {
-      console.error("Error loading app data:", err);
-      const fallback = INITIAL_CURATED_PROMPTS.map((p, idx) => ({
-        id: `prompt-${idx + 1}`,
-        orderIndex: idx + 1,
-        title: p.title,
-        category: p.category,
-        difficulty: p.difficulty,
-      }));
-      setPrompts(fallback);
+      console.error("Error loading challenges:", err);
     }
   };
 
-  const loadPendingSubmissions = async () => {
+  // When activeChallenge changes, load its prompts and user submissions
+  useEffect(() => {
+    if (!activeChallenge || !currentUser) return;
+    loadChallengeData(activeChallenge.id, currentUser.uid);
+  }, [activeChallenge, currentUser]);
+
+  const loadChallengeData = async (challengeId: string, uid: string) => {
     try {
-      const q = query(collection(db, "drawings"), where("status", "==", "PENDING"));
+      // Load prompts for this challenge
+      const pQuery = query(collection(db, "prompts"), where("challenge_id", "==", challengeId));
+      const pSnap = await getDocs(pQuery);
+      let challengePrompts: DrawingPrompt[] = [];
+
+      pSnap.forEach((d) => {
+        challengePrompts.push(d.data() as DrawingPrompt);
+      });
+
+      // If none found for this challenge, check if there are orphan prompts to assign or create curated
+      if (challengePrompts.length === 0) {
+        const allPromptsSnap = await getDocs(collection(db, "prompts"));
+        allPromptsSnap.forEach((d) => {
+          const data = d.data() as DrawingPrompt & { challenge_id?: string };
+          if (!data.challenge_id || data.challenge_id === challengeId) {
+            challengePrompts.push(data);
+          }
+        });
+
+        if (challengePrompts.length === 0) {
+          challengePrompts = INITIAL_CURATED_PROMPTS.map((p, idx) => ({
+            id: `prompt-${challengeId}-${idx + 1}`,
+            challenge_id: challengeId,
+            orderIndex: idx + 1,
+            title: p.title,
+            category: p.category,
+            difficulty: p.difficulty,
+          }));
+        } else {
+          challengePrompts = challengePrompts.map((p, idx) => ({
+            ...p,
+            challenge_id: challengeId,
+            orderIndex: p.orderIndex || idx + 1,
+          }));
+        }
+
+        for (const p of challengePrompts) {
+          await setDoc(doc(db, "prompts", p.id), p);
+        }
+      }
+
+      challengePrompts.sort((a, b) => a.orderIndex - b.orderIndex);
+      setPrompts(challengePrompts);
+      setActivePromptIndex(0);
+
+      // Load user submissions for this challenge
+      const subQuery = query(
+        collection(db, "drawings"),
+        where("challenge_id", "==", challengeId),
+        where("user_id", "==", uid)
+      );
+      const subSnap = await getDocs(subQuery);
+      const subMap: Record<string, DrawingSubmission> = {};
+      subSnap.forEach((d) => {
+        const data = d.data() as DrawingSubmission;
+        subMap[data.prompt_id] = { ...data, id: d.id };
+      });
+      setUserSubmissionsMap(subMap);
+
+      // If user is creator, load pending submissions
+      if (activeChallenge?.creator_id === uid) {
+        await loadPendingSubmissions(challengeId);
+      }
+    } catch (err) {
+      console.error("Error loading challenge data:", err);
+    }
+  };
+
+  const loadPendingSubmissions = async (challengeId: string) => {
+    try {
+      const q = query(
+        collection(db, "drawings"),
+        where("challenge_id", "==", challengeId),
+        where("status", "==", "PENDING")
+      );
       const snap = await getDocs(q);
       const pending: DrawingSubmission[] = [];
       snap.forEach((d) => {
@@ -240,20 +451,21 @@ export function App() {
     setImportedImageUrl(null);
   }, [activePrompt]);
 
-  // Load cloistered gallery for activePrompt
+  // Load gallery for activePrompt
   useEffect(() => {
     const loadGallery = async () => {
-      if (!activePrompt || !activePrompt.id) return;
+      if (!activePrompt || !activePrompt.id || !activeChallenge) return;
       setGalleryLoading(true);
       try {
         const q = query(
           collection(db, "drawings"),
+          where("challenge_id", "==", activeChallenge.id),
           where("prompt_id", "==", activePrompt.id),
           where("status", "==", "APPROVED")
         );
         const snap = await getDocs(q);
         const list: Array<{ id: string; imageUrl: string; userId: string; submissionId: string }> = [];
-        
+
         for (const d of snap.docs) {
           const data = d.data();
           const url = data.image_url || data.imageUrl || "";
@@ -275,7 +487,94 @@ export function App() {
       }
     };
     loadGallery();
-  }, [activePrompt]);
+  }, [activePrompt, activeChallenge]);
+
+  const handleCreateChallenge = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!currentUser || !newChallengeTitle.trim()) return;
+
+    try {
+      const challId = `chall-${Date.now()}`;
+      const challData: any = {
+        id: challId,
+        title: newChallengeTitle.trim(),
+        description: newChallengeDesc.trim(),
+        creator_id: currentUser.uid,
+        creator_name: currentUser.displayName || currentUser.email || "Créateur",
+        is_public: newChallengeIsPublic,
+        is_open: true,
+        participants: [currentUser.uid],
+        created_at: serverTimestamp(),
+      };
+
+      if (!newChallengeIsPublic) {
+        if (!newChallengeCode.trim()) {
+          alert("Veuillez fournir un code d'invitation secret pour le challenge privé.");
+          return;
+        }
+        challData.invite_code = newChallengeCode.trim();
+      } else {
+        challData.max_participants = Math.min(50, Math.max(1, newChallengeMaxParticipants));
+      }
+
+      await setDoc(doc(db, "challenges", challId), challData);
+
+      const chall: Challenge = {
+        id: challId,
+        title: newChallengeTitle.trim(),
+        description: newChallengeDesc.trim(),
+        creator_id: currentUser.uid,
+        creator_name: currentUser.displayName || currentUser.email || "Créateur",
+        is_public: newChallengeIsPublic,
+        invite_code: challData.invite_code,
+        is_open: true,
+        max_participants: challData.max_participants,
+        participants: [currentUser.uid],
+        created_at: new Date(),
+      };
+
+      // Create initial curated prompts for this new challenge
+      const initialPrompts = INITIAL_CURATED_PROMPTS.map((p, idx) => ({
+        id: `prompt-${challId}-${idx + 1}`,
+        challenge_id: challId,
+        orderIndex: idx + 1,
+        title: p.title,
+        category: p.category,
+        difficulty: p.difficulty,
+      }));
+
+      for (const p of initialPrompts) {
+        await setDoc(doc(db, "prompts", p.id), p);
+      }
+
+      setChallenges((prev) => [chall, ...prev]);
+      setActiveChallenge(chall);
+      setShowCreateChallengeModal(false);
+      setNewChallengeTitle("");
+      setNewChallengeDesc("");
+      setNewChallengeIsPublic(true);
+      setNewChallengeCode("");
+      setNewChallengeMaxParticipants(50);
+    } catch (err) {
+      console.error("Error creating challenge:", err);
+      alert("Erreur lors de la création du challenge.");
+    }
+  };
+
+  // Join Private Challenge handler
+  const handleJoinPrivateChallenge = async () => {
+    if (!joinCodeInput.trim()) return;
+    const found = challenges.find(
+      (c) => !c.is_public && c.invite_code?.toLowerCase() === joinCodeInput.trim().toLowerCase()
+    );
+    if (found) {
+      await joinChallenge(found);
+      setJoinCodeInput("");
+      setJoinError(null);
+    } else {
+      setJoinError("Code d'invitation invalide ou challenge introuvable.");
+    }
+  };
 
   // Canvas setup
   const fillPaper = useCallback((ctx: CanvasRenderingContext2D, width: number, height: number) => {
@@ -300,12 +599,12 @@ export function App() {
 
   useEffect(() => {
     const canvas = canvasRef.current;
-    if (!canvas) return;
+    if (!canvas || !activeChallenge) return;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     fillPaper(ctx, canvas.width, canvas.height);
     saveHistory();
-  }, [activePrompt, fillPaper, saveHistory]);
+  }, [activePrompt, activeChallenge, fillPaper, saveHistory]);
 
   const getCoordinates = (
     e: React.MouseEvent<HTMLCanvasElement> | React.TouchEvent<HTMLCanvasElement>
@@ -389,23 +688,24 @@ export function App() {
     saveHistory();
   };
 
-  // Submit drawing directly to Firestore
+  // Submit drawing
   const processAndSubmitImage = async (dataUrl: string) => {
-    if (!currentUser) {
-      setSubmissionError("Veuillez vous connecter pour soumettre votre dessin.");
+    if (!currentUser || !activeChallenge) {
+      setSubmissionError("Veuillez sélectionner un challenge et vous connecter.");
       return;
     }
     setIsSubmitting(true);
     setSubmissionError(null);
 
     try {
-      const subId = `${activePrompt.id}_${currentUser.uid}`;
+      const subId = `${activeChallenge.id}_${activePrompt.id}_${currentUser.uid}`;
       const subDocRef = doc(db, "drawings", subId);
       const subData: DrawingSubmission = {
         id: subId,
+        challenge_id: activeChallenge.id,
         prompt_id: activePrompt.id,
         user_id: currentUser.uid,
-        storage_path: `firestore_direct/${subId}.webp`,
+        storage_path: `drawings/${subId}.webp`,
         image_url: dataUrl,
         status: "PENDING",
         rejection_reason: null,
@@ -421,11 +721,11 @@ export function App() {
         [activePrompt.id]: subData,
       }));
 
-      if (userRole === "admin") {
-        await loadPendingSubmissions();
+      if (currentUser.uid === activeChallenge.creator_id) {
+        await loadPendingSubmissions(activeChallenge.id);
       }
     } catch (err: unknown) {
-      const msg = err instanceof Error ? err.message : "Erreur inattendue lors de l'envoi.";
+      const msg = err instanceof Error ? err.message : "Erreur lors de l'envoi.";
       setSubmissionError(msg);
     } finally {
       setIsSubmitting(false);
@@ -482,12 +782,13 @@ export function App() {
     }
   };
 
-  // Admin Actions for Manual Moderation
-  const handleAdminApprove = async (sub: DrawingSubmission) => {
+  // Creator Moderation Actions
+  const handleCreatorApprove = async (sub: DrawingSubmission) => {
+    if (!activeChallenge) return;
     try {
       const subRef = doc(db, "drawings", sub.id);
       await updateDoc(subRef, { status: "APPROVED", rejection_reason: null });
-      await loadPendingSubmissions();
+      await loadPendingSubmissions(activeChallenge.id);
       if (sub.user_id === currentUser?.uid) {
         setUserSubmissionsMap((prev) => ({
           ...prev,
@@ -499,7 +800,8 @@ export function App() {
     }
   };
 
-  const handleAdminReject = async (sub: DrawingSubmission) => {
+  const handleCreatorReject = async (sub: DrawingSubmission) => {
+    if (!activeChallenge) return;
     if (!rejectionReasonInput.trim()) {
       alert("Veuillez saisir un motif de refus.");
       return;
@@ -513,7 +815,7 @@ export function App() {
 
       setRejectingSubId(null);
       setRejectionReasonInput("");
-      await loadPendingSubmissions();
+      await loadPendingSubmissions(activeChallenge.id);
 
       if (sub.user_id === currentUser?.uid) {
         setUserSubmissionsMap((prev) => ({
@@ -526,8 +828,8 @@ export function App() {
     }
   };
 
-  // Admin Retraction of Approved Drawing & Demotion
-  const handleAdminRetractDrawing = async () => {
+  // Creator Retract Approved Drawing
+  const handleCreatorRetractDrawing = async () => {
     if (!retractingDrawing || !retractionReasonInput.trim()) {
       alert("Veuillez saisir un motif de retrait.");
       return;
@@ -536,7 +838,6 @@ export function App() {
       const subRef = doc(db, "drawings", retractingDrawing.id);
       await deleteDoc(subRef);
 
-      // Remove from user submissions map locally if it affects current view
       setUserSubmissionsMap((prev) => {
         const next = { ...prev };
         delete next[retractingDrawing.promptId];
@@ -546,23 +847,23 @@ export function App() {
       setGalleryDrawings((prev) => prev.filter((item) => item.submissionId !== retractingDrawing.id));
       setRetractingDrawing(null);
       setRetractionReasonInput("");
-      alert("Dessin retiré avec succès et utilisateur rétrogradé sur cette étape.");
+      alert("Dessin retiré avec succès et participant rétrogradé sur cette étape.");
     } catch (err) {
       console.error("Error retracting drawing:", err);
     }
   };
 
-  // Admin Prompt CRUD
+  // Creator Prompt CRUD
   const handleSavePrompt = async () => {
-    if (!promptTitleInput.trim()) return;
+    if (!promptTitleInput.trim() || !activeChallenge) return;
     try {
-      // Check if this is an existing prompt in state
       const existing = prompts.find((p) => p.id === editingPrompt?.id);
-      const pId = existing ? existing.id : `prompt-${Date.now()}`;
+      const pId = existing ? existing.id : `prompt-${activeChallenge.id}-${Date.now()}`;
       const order = existing ? existing.orderIndex : prompts.length + 1;
 
-      const newPrompt: DrawingPrompt = {
+      const newPrompt: DrawingPrompt & { challenge_id: string } = {
         id: pId,
+        challenge_id: activeChallenge.id,
         orderIndex: order,
         title: promptTitleInput.trim(),
         category: promptCategoryInput,
@@ -603,7 +904,6 @@ export function App() {
     newPrompts[index] = newPrompts[targetIndex];
     newPrompts[targetIndex] = temp;
 
-    // Re-index orderIndex
     const reindexed = newPrompts.map((p, idx) => ({ ...p, orderIndex: idx + 1 }));
     setPrompts(reindexed);
 
@@ -613,15 +913,15 @@ export function App() {
   };
 
   const handleGeneratePrompts = async () => {
+    if (!activeChallenge) return;
     setIsGeneratingPrompts(true);
     setPromptError(null);
     const themeToUse = selectedTheme === "custom" && customThemeInput.trim() ? customThemeInput.trim() : selectedTheme;
 
     try {
-      // For static GitHub Pages, we prompt user for API key or use local environment / localStorage
       let apiKey = import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem("artguard_gemini_key");
       if (!apiKey) {
-        apiKey = prompt("Veuillez entrer votre clé API Gemini (pour la génération des sujets) :") || "";
+        apiKey = prompt("Veuillez entrer votre clé API Gemini pour générer les sujets :") || "";
         if (apiKey) {
           localStorage.setItem("artguard_gemini_key", apiKey);
         } else {
@@ -629,9 +929,11 @@ export function App() {
         }
       }
 
-      const newPrompts = await generatePromptsClientSide(apiKey, 6, themeToUse);
-      const reindexed = newPrompts.map((p, idx) => ({
+      const generated = await generatePromptsClientSide(apiKey, 6, themeToUse);
+      const reindexed = generated.map((p, idx) => ({
         ...p,
+        id: `prompt-${activeChallenge.id}-${Date.now()}-${idx}`,
+        challenge_id: activeChallenge.id,
         orderIndex: prompts.length + idx + 1,
       }));
 
@@ -647,8 +949,6 @@ export function App() {
       setIsGeneratingPrompts(false);
     }
   };
-
-  const strictJsonString = useMemo(() => JSON.stringify(prompts, null, 2), [prompts]);
 
   // Landing Page if not logged in
   if (!currentUser) {
@@ -671,15 +971,15 @@ export function App() {
         <main className="flex-1 flex flex-col items-center justify-center px-6 py-16 text-center max-w-4xl mx-auto space-y-8">
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-amber-100/80 text-amber-900 text-xs font-medium border border-amber-200">
             <Sparkles className="w-3.5 h-3.5 text-amber-700" />
-            Atelier de dessin collectif modéré par l'administrateur
+            Atelier de dessin collectif multi-challenges & modération par créateur
           </div>
 
           <h1 className="text-4xl sm:text-6xl font-bold font-display tracking-tight text-stone-900 leading-tight" style={{ textWrap: "balance" }}>
-            Exprimez votre créativité dans un espace protégé et bienveillant.
+            Créez vos propres challenges et dessinez en toute bienveillance.
           </h1>
 
           <p className="text-base sm:text-lg text-stone-600 max-w-2xl leading-relaxed">
-            Chaque dessin soumis est vérifié manuellement par l'administrateur avant de valider votre progression et d'ouvrir l'accès aux galeries exclusives.
+            Chaque créateur gère ses sujets et modère les soumissions de sa communauté. Progressez pas à pas au sein des fresques collectives.
           </p>
 
           <div className="pt-4">
@@ -695,12 +995,394 @@ export function App() {
         </main>
 
         <footer className="py-6 text-center text-xs text-stone-500 border-t border-stone-200 bg-white">
-          ArtGuard AI · Plateforme de dessin collectif modérée
+          ArtGuard AI · Plateforme multi-challenges collaborative
         </footer>
       </div>
     );
   }
 
+  // If no active challenge selected, show Challenge Dashboard
+  if (!activeChallenge) {
+    const myChallenges = challenges.filter((c) => c.creator_id === currentUser.uid);
+    const joinedChallengesList = challenges.filter(
+      (c) => userProfile?.joinedChallenges?.includes(c.id) && c.creator_id !== currentUser.uid && (c.is_open !== false || c.creator_id === currentUser.uid)
+    );
+    const publicChallenges = challenges.filter(
+      (c) => c.is_public && c.creator_id !== currentUser.uid && !userProfile?.joinedChallenges?.includes(c.id) && (c.is_open !== false)
+    );
+
+    return (
+      <div className="min-h-screen flex flex-col bg-[#FAF8F5] text-stone-900">
+        <header className="flex items-center justify-between px-6 lg:px-10 py-4 bg-[#FAF8F5]/95 backdrop-blur-sm border-b border-stone-200">
+          <div className="text-xl font-bold tracking-tight text-stone-900 font-display">
+            ArtGuard AI <span className="text-xs font-normal text-stone-500">· Tableau de bord des Challenges</span>
+          </div>
+
+          <div className="flex items-center gap-3">
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-stone-700 bg-stone-100 px-3 py-1.5 rounded-lg">
+              <User className="w-3.5 h-3.5 text-emerald-800" />
+              {currentUser.displayName || currentUser.email}
+            </span>
+            <button
+              type="button"
+              onClick={() => signOut(auth)}
+              className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-stone-700 bg-white border border-stone-200 hover:bg-stone-50 rounded-lg transition-colors cursor-pointer"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              Déconnexion
+            </button>
+          </div>
+        </header>
+
+        <main className="flex-1 w-full max-w-[1200px] mx-auto px-6 py-10 space-y-10">
+          {/* Header & Actions */}
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-stone-200">
+            <div>
+              <h1 className="text-3xl font-bold text-stone-900 tracking-tight">Choisissez ou créez un Challenge</h1>
+              <p className="text-sm text-stone-600 mt-1">Rejoignez un atelier public, entrez un code secret ou lancez votre propre challenge.</p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => {
+                  setNewChallengeCode(generateUniqueCode());
+                  setShowCreateChallengeModal(true);
+                }}
+                className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl shadow-sm cursor-pointer transition-colors"
+              >
+                <FolderPlus className="w-4 h-4" />
+                Créer un challenge
+              </button>
+            </div>
+          </div>
+
+          {/* Join Private Challenge Bar */}
+          <div className="p-6 bg-white border border-stone-200 rounded-2xl shadow-xs space-y-3">
+            <h3 className="text-sm font-bold text-stone-900 flex items-center gap-2">
+              <Key className="w-4 h-4 text-amber-800" />
+              Rejoindre un challenge privé par code
+            </h3>
+            <div className="flex items-center gap-3 max-w-lg">
+              <input
+                type="text"
+                value={joinCodeInput}
+                onChange={(e) => setJoinCodeInput(e.target.value)}
+                placeholder="Entrez le code d'invitation secret..."
+                className="flex-1 px-3.5 py-2 text-xs border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+              />
+              <button
+                type="button"
+                onClick={handleJoinPrivateChallenge}
+                className="px-4 py-2 text-xs font-semibold text-white bg-stone-900 hover:bg-stone-800 rounded-xl cursor-pointer"
+              >
+                Accéder
+              </button>
+            </div>
+            {joinError && <p className="text-xs text-red-600">{joinError}</p>}
+          </div>
+
+          {/* My Created Challenges */}
+          {myChallenges.length > 0 && (
+            <div className="space-y-4">
+              <h2 className="text-lg font-bold text-stone-900 flex items-center gap-2">
+                <ShieldCheck className="w-5 h-5 text-amber-800" />
+                Vos challenges créés (Vous êtes modérateur)
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {myChallenges.map((c) => (
+                  <div
+                    key={c.id}
+                    onClick={() => joinChallenge(c)}
+                    className="p-6 bg-white border border-amber-300 rounded-2xl shadow-xs hover:shadow-md transition-all cursor-pointer flex flex-col justify-between space-y-4 group relative"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className={`px-2.5 py-1 text-[10px] font-mono font-bold rounded-full ${c.is_open !== false ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
+                          {c.is_open !== false ? 'Ouvert' : 'Fermé'}
+                        </span>
+                        <span className="text-xs text-stone-500 font-mono">
+                          {c.is_public ? `Public (${c.participants?.length || 1}/${c.max_participants || 50})` : `Privé (${c.invite_code || ''})`}
+                        </span>
+                      </div>
+                      <h3 className="text-base font-bold text-stone-900 group-hover:text-amber-950 transition-colors">
+                        {c.title}
+                      </h3>
+                      <p className="text-xs text-stone-600 line-clamp-2 leading-relaxed">
+                        {c.description || "Aucune description."}
+                      </p>
+                    </div>
+
+                    <div className="pt-3 border-t border-stone-100 flex items-center justify-between text-xs">
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={(e) => toggleChallengeOpen(c, e)}
+                          className={`px-2.5 py-1 font-semibold rounded-lg transition-colors ${c.is_open !== false ? 'bg-amber-100 text-amber-900 hover:bg-amber-200' : 'bg-emerald-100 text-emerald-800 hover:bg-emerald-200'}`}
+                        >
+                          {c.is_open !== false ? 'Fermer' : 'Ouvrir'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={(e) => deleteChallenge(c, e)}
+                          className="p-1.5 text-stone-400 hover:text-red-600 rounded-lg transition-colors"
+                          title="Supprimer le challenge"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </div>
+                      <span className="font-semibold text-amber-900 flex items-center gap-1">
+                        Atelier →
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Joined Challenges */}
+          {joinedChallengesList.length > 0 && (
+            <div className="space-y-4">
+              <h2 className="text-lg font-bold text-stone-900 flex items-center gap-2">
+                <User className="w-5 h-5 text-emerald-800" />
+                Challenges rejoints (Enregistrés dans votre profil)
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {joinedChallengesList.map((c) => (
+                  <div
+                    key={c.id}
+                    onClick={() => joinChallenge(c)}
+                    className="p-6 bg-white border border-emerald-200 rounded-2xl shadow-xs hover:shadow-md transition-all cursor-pointer flex flex-col justify-between space-y-4 group"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="px-2.5 py-1 text-[10px] font-mono font-bold bg-emerald-100 text-emerald-800 rounded-full">
+                          Rejoint
+                        </span>
+                        <span className="text-xs text-stone-500 font-mono">
+                          {c.is_public ? "Public" : "Privé"}
+                        </span>
+                      </div>
+                      <h3 className="text-base font-bold text-stone-900 group-hover:text-emerald-900 transition-colors">
+                        {c.title}
+                      </h3>
+                      <p className="text-xs text-stone-600 line-clamp-2 leading-relaxed">
+                        {c.description || "Aucune description."}
+                      </p>
+                    </div>
+
+                    <div className="pt-3 border-t border-stone-100 flex items-center justify-between text-xs font-semibold text-emerald-800">
+                      <span>Ouvrir l'atelier</span>
+                      <span>→</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Public Challenges */}
+          {publicChallenges.length > 0 && (
+            <div className="space-y-4">
+              <h2 className="text-lg font-bold text-stone-900 flex items-center gap-2">
+                <Compass className="w-5 h-5 text-amber-800" />
+                Challenges Publics disponibles
+              </h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {publicChallenges.map((c) => (
+                  <div
+                    key={c.id}
+                    onClick={() => joinChallenge(c)}
+                    className="p-6 bg-white border border-stone-200 rounded-2xl shadow-xs hover:shadow-md transition-all cursor-pointer flex flex-col justify-between space-y-4 group"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="px-2.5 py-1 text-[10px] font-mono font-bold bg-stone-100 text-stone-700 rounded-full">
+                          Par {c.creator_name}
+                        </span>
+                        <span className="text-xs text-emerald-700 font-semibold">
+                          Public ({c.participants?.length || 1}/{c.max_participants || 50})
+                        </span>
+                      </div>
+                      <h3 className="text-base font-bold text-stone-900 group-hover:text-amber-900 transition-colors">
+                        {c.title}
+                      </h3>
+                      <p className="text-xs text-stone-600 line-clamp-2 leading-relaxed">
+                        {c.description || "Aucune description."}
+                      </p>
+                    </div>
+
+                    <div className="pt-3 border-t border-stone-100 flex items-center justify-between text-xs font-semibold text-stone-800 group-hover:text-amber-900">
+                      <span>Rejoindre l'atelier</span>
+                      <span>→</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </main>
+
+        {/* Create Challenge Modal */}
+        {showCreateChallengeModal && (
+          <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl p-6 max-w-lg w-full space-y-5 shadow-2xl">
+              <div className="flex items-center justify-between pb-3 border-b border-stone-200">
+                <h3 className="text-lg font-bold text-stone-900">Créer un nouveau Challenge</h3>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateChallengeModal(false)}
+                  className="p-1 text-stone-400 hover:text-stone-700 rounded-lg cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <form onSubmit={handleCreateChallenge} className="space-y-4">
+                <div>
+                  <label className="block text-xs font-medium text-stone-700 mb-1">Titre du challenge *</label>
+                  <input
+                    type="text"
+                    required
+                    value={newChallengeTitle}
+                    onChange={(e) => setNewChallengeTitle(e.target.value)}
+                    placeholder="Ex: Le bestiaire fantastique..."
+                    className="w-full px-3.5 py-2 text-xs border border-stone-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-900 bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-stone-700 mb-1">Description</label>
+                  <textarea
+                    rows={3}
+                    value={newChallengeDesc}
+                    onChange={(e) => setNewChallengeDesc(e.target.value)}
+                    placeholder="Décrivez l'ambiance et les règles de votre challenge..."
+                    className="w-full px-3.5 py-2 text-xs border border-stone-300 rounded-xl focus:outline-none focus:ring-2 focus:ring-amber-900 bg-white"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-medium text-stone-700 mb-1">Visibilité</label>
+                  <select
+                    value={newChallengeIsPublic ? "public" : "private"}
+                    onChange={(e) => setNewChallengeIsPublic(e.target.value === "public")}
+                    className="w-full px-3.5 py-2 text-xs border border-stone-300 rounded-xl bg-white focus:outline-none"
+                  >
+                    <option value="public">Public (Visible par tous, avec limite)</option>
+                    <option value="private">Privé (Accessible via code secret)</option>
+                  </select>
+                </div>
+
+                {newChallengeIsPublic ? (
+                  <div>
+                    <label className="block text-xs font-medium text-stone-700 mb-1">Limite de participants (50 max)</label>
+                    <input
+                      type="number"
+                      min={1}
+                      max={50}
+                      value={newChallengeMaxParticipants}
+                      onChange={(e) => setNewChallengeMaxParticipants(parseInt(e.target.value) || 50)}
+                      className="w-full px-3.5 py-2 text-xs border border-stone-300 rounded-xl bg-white focus:outline-none focus:ring-2 focus:ring-amber-900"
+                    />
+                    <p className="text-[10px] text-stone-500 mt-1">
+                      Nombre maximum de participants autorisés (jusqu'à 50).
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="flex items-center justify-between mb-1">
+                      <label className="block text-xs font-medium text-stone-700">Code unique du challenge *</label>
+                      <button
+                        type="button"
+                        onClick={() => setNewChallengeCode(generateUniqueCode())}
+                        className="text-[11px] text-amber-900 hover:underline flex items-center gap-1 cursor-pointer font-medium"
+                      >
+                        <RefreshCw className="w-3 h-3" /> Générer un autre code
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      required
+                      value={newChallengeCode}
+                      onChange={(e) => setNewChallengeCode(e.target.value)}
+                      placeholder="Ex: ART-8492"
+                      className="w-full px-3.5 py-2 text-xs font-mono font-bold border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                    />
+                    <p className="text-[10px] text-stone-500 mt-1">
+                      Ce code secret sera exigé pour permettre aux participants de rejoindre votre challenge privé.
+                    </p>
+                  </div>
+                )}
+
+                <div className="flex items-center gap-2 pt-2">
+                  <button
+                    type="submit"
+                    className="flex-1 py-2.5 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer"
+                  >
+                    Créer et lancer
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowCreateChallengeModal(false)}
+                    className="px-4 py-2.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded-xl cursor-pointer"
+                  >
+                    Annuler
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* Delete Confirmation Modal */}
+        {challengeToDelete && (
+          <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+            <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
+              <div className="flex items-center justify-between pb-3 border-b border-stone-200">
+                <h3 className="text-base font-bold text-red-700 flex items-center gap-2">
+                  <Trash2 className="w-5 h-5" /> Confirmer la suppression
+                </h3>
+                <button
+                  type="button"
+                  onClick={() => setChallengeToDelete(null)}
+                  className="p-1 text-stone-400 hover:text-stone-700 rounded-lg cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <p className="text-xs text-stone-600 leading-relaxed">
+                Êtes-vous sûr de vouloir supprimer le challenge <strong className="text-stone-900">"{challengeToDelete.title}"</strong> ? 
+                <br /><br />
+                <span className="text-red-600 font-semibold">Attention :</span> TOUT sera supprimé définitivement de la base de données (le challenge, tous ses sujets et toutes les soumissions d'images associées) et le challenge ne sera plus affiché.
+              </p>
+
+              <div className="flex items-center gap-2 pt-3">
+                <button
+                  type="button"
+                  onClick={confirmDeleteChallenge}
+                  className="flex-1 py-2.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-xl cursor-pointer"
+                >
+                  Supprimer définitivement
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setChallengeToDelete(null)}
+                  className="px-4 py-2.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded-xl cursor-pointer"
+                >
+                  Annuler
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const isCreator = currentUser.uid === activeChallenge.creator_id;
   const currentSub = userSubmissionsMap[activePrompt.id];
   const isApproved = currentSub?.status === "APPROVED";
   const isPending = currentSub?.status === "PENDING";
@@ -708,55 +1390,66 @@ export function App() {
 
   return (
     <div className="min-h-screen flex flex-col bg-[#FAF8F5] text-stone-900">
-      {/* Top Bar Contract */}
-      <header className="sticky top-0 z-30 flex items-center justify-between gap-8 px-6 lg:px-10 py-4 bg-[#FAF8F5]/95 backdrop-blur-sm border-b border-stone-200">
+      {/* Top Bar */}
+      <header className="sticky top-0 z-30 flex items-center justify-between gap-6 px-6 lg:px-10 py-4 bg-[#FAF8F5]/95 backdrop-blur-sm border-b border-stone-200">
         <div className="flex items-center gap-4">
-          <a href="/" className="text-xl font-bold tracking-tight text-stone-900 font-display whitespace-nowrap shrink-0">
-            ArtGuard AI <span className="text-xs font-normal text-stone-500">· Atelier Collectif</span>
-          </a>
+          <button
+            type="button"
+            onClick={() => setActiveChallenge(null)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-stone-700 bg-white border border-stone-200 hover:bg-stone-50 rounded-lg cursor-pointer"
+          >
+            ← Challenges
+          </button>
 
-          {userRole === "admin" && (
-            <div className="flex items-center gap-1 p-1 bg-stone-200 rounded-lg">
-              <button
-                type="button"
-                onClick={() => setActiveAdminTab("atelier")}
-                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                  activeAdminTab === "atelier" ? "bg-white text-stone-900 shadow-xs" : "text-stone-600 hover:text-stone-900"
-                }`}
-              >
-                Atelier (Utilisateur)
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveAdminTab("moderation");
-                  loadPendingSubmissions();
-                }}
-                className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                  activeAdminTab === "moderation" ? "bg-white text-stone-900 shadow-xs" : "text-stone-600 hover:text-stone-900"
-                }`}
-              >
-                <ShieldCheck className="w-3.5 h-3.5 text-amber-800" />
-                Modération ({pendingSubmissions.length})
-              </button>
-              <button
-                type="button"
-                onClick={() => setActiveAdminTab("prompts")}
-                className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                  activeAdminTab === "prompts" ? "bg-white text-stone-900 shadow-xs" : "text-stone-600 hover:text-stone-900"
-                }`}
-              >
-                <ListOrdered className="w-3.5 h-3.5 text-amber-800" />
-                Gestion Sujets ({prompts.length})
-              </button>
-            </div>
-          )}
+          <div className="hidden sm:block">
+            <h2 className="text-sm font-bold text-stone-900">{activeChallenge.title}</h2>
+            <p className="text-[11px] text-stone-500">Par {activeChallenge.creator_name} {isCreator ? "(Vous êtes créateur)" : ""}</p>
+          </div>
+
+          <div className="flex items-center gap-1 p-1 bg-stone-200 rounded-lg">
+            <button
+              type="button"
+              onClick={() => setActiveTab("atelier")}
+              className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                activeTab === "atelier" ? "bg-white text-stone-900 shadow-xs" : "text-stone-600 hover:text-stone-900"
+              }`}
+            >
+              Atelier
+            </button>
+            {isCreator && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setActiveTab("moderation");
+                    loadPendingSubmissions(activeChallenge.id);
+                  }}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                    activeTab === "moderation" ? "bg-white text-stone-900 shadow-xs" : "text-stone-600 hover:text-stone-900"
+                  }`}
+                >
+                  <ShieldCheck className="w-3.5 h-3.5 text-amber-800" />
+                  Modération ({pendingSubmissions.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("prompts")}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                    activeTab === "prompts" ? "bg-white text-stone-900 shadow-xs" : "text-stone-600 hover:text-stone-900"
+                  }`}
+                >
+                  <ListOrdered className="w-3.5 h-3.5 text-amber-800" />
+                  Gestion Sujets ({prompts.length})
+                </button>
+              </>
+            )}
+          </div>
         </div>
 
         <div className="flex items-center gap-3">
-          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-stone-700 bg-stone-100 px-3 py-1.5 rounded-lg">
+          <span className="hidden md:inline-flex items-center gap-1.5 text-xs font-medium text-stone-700 bg-stone-100 px-3 py-1.5 rounded-lg">
             <User className="w-3.5 h-3.5 text-emerald-800" />
-            {currentUser.displayName || currentUser.email} ({userRole === "admin" ? "Admin" : "Participant"})
+            {currentUser.displayName || currentUser.email}
           </span>
           <button
             type="button"
@@ -771,17 +1464,17 @@ export function App() {
 
       {/* Main Container */}
       <main className="flex-1 w-full max-w-[1380px] mx-auto px-6 lg:px-10 py-8 space-y-12">
-        {userRole === "admin" && activeAdminTab === "moderation" ? (
-          /* ADMIN MODERATION PANEL */
+        {activeTab === "moderation" && isCreator ? (
+          /* CREATOR MODERATION PANEL */
           <section className="space-y-6">
             <div className="flex items-center justify-between pb-4 border-b border-stone-200">
               <div>
-                <h1 className="text-2xl font-semibold text-stone-900">File d'attente de modération manuelle</h1>
-                <p className="text-xs text-stone-500">Validez ou refusez les dessins soumis par les participants.</p>
+                <h1 className="text-2xl font-semibold text-stone-900">Modération des soumissions · {activeChallenge.title}</h1>
+                <p className="text-xs text-stone-500">Validez ou refusez les dessins soumis par les participants de votre challenge.</p>
               </div>
               <button
                 type="button"
-                onClick={loadPendingSubmissions}
+                onClick={() => loadPendingSubmissions(activeChallenge.id)}
                 className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-stone-700 bg-white border border-stone-200 rounded-lg hover:bg-stone-50 cursor-pointer"
               >
                 <RefreshCw className="w-3.5 h-3.5" />
@@ -818,12 +1511,12 @@ export function App() {
                             value={rejectionReasonInput}
                             onChange={(e) => setRejectionReasonInput(e.target.value)}
                             placeholder="Motif du refus obligatoire..."
-                            className="w-full px-3 py-1.5 text-xs border border-red-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500"
+                            className="w-full px-3 py-1.5 text-xs border border-red-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
                           />
                           <div className="flex items-center gap-2">
                             <button
                               type="button"
-                              onClick={() => handleAdminReject(sub)}
+                              onClick={() => handleCreatorReject(sub)}
                               className="flex-1 px-3 py-1.5 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-lg cursor-pointer"
                             >
                               Confirmer le refus
@@ -844,7 +1537,7 @@ export function App() {
                         <div className="flex items-center gap-2 pt-2 border-t border-stone-100">
                           <button
                             type="button"
-                            onClick={() => handleAdminApprove(sub)}
+                            onClick={() => handleCreatorApprove(sub)}
                             className="flex-1 inline-flex items-center justify-center gap-1 px-3 py-2 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg cursor-pointer"
                           >
                             <CheckCircle2 className="w-4 h-4" />
@@ -869,20 +1562,20 @@ export function App() {
               </div>
             )}
           </section>
-        ) : userRole === "admin" && activeAdminTab === "prompts" ? (
-          /* ADMIN PROMPT MANAGEMENT PANEL */
+        ) : activeTab === "prompts" && isCreator ? (
+          /* CREATOR PROMPT MANAGEMENT PANEL */
           <section className="space-y-6">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-stone-200">
               <div>
-                <h1 className="text-2xl font-semibold text-stone-900">Gestion Avancée des Sujets (CRUD)</h1>
-                <p className="text-xs text-stone-500">Créez, éditez, réordonnez ou supprimez les étapes de l'atelier.</p>
+                <h1 className="text-2xl font-semibold text-stone-900">Gestion des Sujets · {activeChallenge.title}</h1>
+                <p className="text-xs text-stone-500">Créez, éditez, réordonnez ou supprimez les étapes de votre challenge.</p>
               </div>
 
               <div className="flex items-center gap-2">
                 <button
                   type="button"
                   onClick={() => {
-                    setEditingPrompt({ id: `prompt-${Date.now()}`, orderIndex: prompts.length + 1, title: "", category: "imagination", difficulty: "facile" });
+                    setEditingPrompt({ id: `prompt-${activeChallenge.id}-${Date.now()}`, challenge_id: activeChallenge.id, orderIndex: prompts.length + 1, title: "", category: "imagination", difficulty: "facile" });
                     setPromptTitleInput("");
                   }}
                   className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-lg cursor-pointer"
@@ -914,7 +1607,7 @@ export function App() {
                       type="text"
                       value={promptTitleInput}
                       onChange={(e) => setPromptTitleInput(e.target.value)}
-                      placeholder="Ex: Dessine une tasse de thé magique..."
+                      placeholder="Ex: Dessine un chat astronaute..."
                       className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-amber-900"
                     />
                   </div>
@@ -1030,17 +1723,15 @@ export function App() {
               <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6 pb-6 border-b border-stone-200">
                 <div className="space-y-2 max-w-2xl">
                   <div className="flex items-center gap-2 text-xs font-medium text-stone-500">
-                    <span>Sujet Actif Unique</span>
+                    <span>Challenge : {activeChallenge.title}</span>
                     <span aria-hidden="true">·</span>
-                    <span>Modération Manuelle Administrateur</span>
-                    <span aria-hidden="true">·</span>
-                    <span>Anonymat Garanti</span>
+                    <span>Modération par {activeChallenge.creator_name}</span>
                   </div>
                   <h1 className="text-3xl sm:text-4xl font-semibold text-stone-900 tracking-tight" style={{ textWrap: "balance" }}>
-                    Atelier de dessin collectif et bienveillant
+                    Atelier de dessin collectif
                   </h1>
                   <p className="text-sm sm:text-base text-stone-600 leading-relaxed">
-                    Soumettez votre dessin. L'administrateur l'examinera pour valider votre étape et débloquer le sujet suivant.
+                    {activeChallenge.description || "Soumettez votre dessin pour valider votre étape et débloquer le sujet suivant."}
                   </p>
                 </div>
               </div>
@@ -1048,16 +1739,16 @@ export function App() {
               {/* Timeline */}
               <div className="space-y-3">
                 <h3 className="text-xs font-semibold text-stone-700">
-                  Votre progression dans l'atelier
+                  Votre progression dans ce challenge
                 </h3>
                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
                   {prompts.map((p, index) => {
                     const sub = userSubmissionsMap[p.id];
                     const isApproved = sub?.status === "APPROVED";
-                    const isUnlocked = userRole === "admin" || index === 0 || Boolean(userSubmissionsMap[prompts[index - 1]?.id]?.status === "APPROVED");
+                    const isUnlocked = isCreator || index === 0 || Boolean(userSubmissionsMap[prompts[index - 1]?.id]?.status === "APPROVED");
                     const isActive = index === activePromptIndex;
 
-                    if (userRole !== "admin" && !isUnlocked && !isActive && index > activePromptIndex) {
+                    if (!isCreator && !isUnlocked && !isActive && index > activePromptIndex) {
                       return null;
                     }
 
@@ -1065,7 +1756,7 @@ export function App() {
                       <button
                         key={p.id}
                         type="button"
-                        disabled={!isUnlocked && userRole !== "admin"}
+                        disabled={!isUnlocked && !isCreator}
                         onClick={() => setActivePromptIndex(index)}
                         className={`p-3.5 rounded-xl border text-left transition-all flex flex-col justify-between gap-3 relative overflow-hidden cursor-pointer ${
                           isActive
@@ -1151,7 +1842,7 @@ export function App() {
                 <div className="p-6 bg-amber-50 border border-amber-200 rounded-xl flex items-center gap-4 text-amber-900">
                   <Clock className="w-6 h-6 text-amber-700 shrink-0" />
                   <div className="space-y-1">
-                    <h3 className="text-sm font-semibold">En attente de validation par l'administrateur</h3>
+                    <h3 className="text-sm font-semibold">En attente de validation par le créateur</h3>
                     <p className="text-xs text-amber-800">Votre dessin a bien été soumis. La galerie et le sujet suivant sont temporairement verrouillés.</p>
                   </div>
                 </div>
@@ -1169,7 +1860,7 @@ export function App() {
                 </div>
               )}
 
-              {/* Canvas or Imported Image Preview (Hidden if pending) */}
+              {/* Canvas or Imported Image Preview */}
               {!isPending && (
                 <div className="bg-white border border-stone-200 rounded-xl p-5 space-y-4 shadow-xs">
                   {importedImageUrl ? (
@@ -1288,7 +1979,7 @@ export function App() {
               )}
             </section>
 
-            {/* Cloistered Gallery (Locked if not approved) */}
+            {/* Cloistered Gallery */}
             <section className="space-y-6 pt-6 border-t border-stone-200">
               <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
                 <div>
@@ -1301,12 +1992,12 @@ export function App() {
                 </div>
               </div>
 
-              {!isApproved && userRole !== "admin" ? (
+              {!isApproved && !isCreator ? (
                 <div className="p-12 bg-white border border-stone-200 rounded-xl text-center space-y-2">
                   <Lock className="w-8 h-8 text-amber-800 mx-auto" />
                   <h3 className="text-sm font-semibold text-stone-900">Galerie verrouillée</h3>
                   <p className="text-xs text-stone-500">
-                    Votre dessin doit être validé par l'administrateur pour déverrouiller et découvrir la galerie de ce sujet.
+                    Votre dessin doit être validé par le créateur pour déverrouiller et découvrir la galerie de ce sujet.
                   </p>
                 </div>
               ) : galleryLoading ? (
@@ -1321,7 +2012,7 @@ export function App() {
                     <div key={item.id} className="relative group aspect-square bg-white border border-stone-200 rounded-xl overflow-hidden shadow-xs hover:shadow-md transition-shadow">
                       <img
                         src={item.imageUrl}
-                        alt="Dessin validé de la fresque collective"
+                        alt="Dessin validé de la fresque"
                         referrerPolicy="no-referrer"
                         onClick={() => {
                           setLightboxImageUrl(item.imageUrl);
@@ -1330,7 +2021,7 @@ export function App() {
                         }}
                         className="w-full h-full object-cover block cursor-zoom-in"
                       />
-                      {userRole === "admin" && (
+                      {isCreator && (
                         <button
                           type="button"
                           onClick={() => {
@@ -1338,7 +2029,7 @@ export function App() {
                             setRetractionReasonInput("");
                           }}
                           className="absolute top-2 right-2 p-1.5 bg-red-600 text-white rounded-lg opacity-0 group-hover:opacity-100 transition-opacity cursor-pointer shadow-md"
-                          title="Retirer ce dessin (Rétrograder l'utilisateur)"
+                          title="Retirer ce dessin (Rétrograder le participant)"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -1432,13 +2123,13 @@ export function App() {
         </div>
       )}
 
-      {/* Admin Retraction Modal */}
+      {/* Creator Retraction Modal */}
       {retractingDrawing && (
         <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
           <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4 shadow-xl">
             <h3 className="text-base font-bold text-stone-900">Retrait a posteriori du dessin</h3>
             <p className="text-xs text-stone-600 leading-relaxed">
-              Le dessin sera supprimé de la fresque et l'utilisateur sera rétrogradé sur cette étape (la galerie sera verrouillée et il devra soumettre un nouveau dessin).
+              Le dessin sera supprimé de la fresque et le participant sera rétrogradé sur cette étape.
             </p>
             <div className="space-y-1">
               <label className="block text-xs font-medium text-stone-700">Motif du retrait (obligatoire)</label>
@@ -1446,14 +2137,14 @@ export function App() {
                 type="text"
                 value={retractionReasonInput}
                 onChange={(e) => setRetractionReasonInput(e.target.value)}
-                placeholder="Ex: Dessin hors-sujet ou signalement..."
-                className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500"
+                placeholder="Ex: Dessin non conforme..."
+                className="w-full px-3 py-2 text-xs border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 bg-white"
               />
             </div>
             <div className="flex items-center gap-2 pt-2">
               <button
                 type="button"
-                onClick={handleAdminRetractDrawing}
+                onClick={handleCreatorRetractDrawing}
                 className="flex-1 py-2 text-xs font-semibold text-white bg-red-700 hover:bg-red-800 rounded-lg cursor-pointer"
               >
                 Confirmer le retrait
@@ -1475,7 +2166,7 @@ export function App() {
           <div className="flex items-center gap-2">
             <span className="font-semibold text-stone-800">ArtGuard AI</span>
             <span aria-hidden="true">·</span>
-            <span>Atelier de dessin collectif avec gestion des sujets et modération a posteriori</span>
+            <span>Atelier multi-challenges avec modération par créateur</span>
           </div>
           <div className="flex items-center gap-3">
             <span>Lightbox Zoom Tactile</span>

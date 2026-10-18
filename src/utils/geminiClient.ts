@@ -1,5 +1,5 @@
 import { GoogleGenAI, Type, GenerateContentResponse } from "@google/genai";
-import { INITIAL_CURATED_PROMPTS, DrawingPrompt } from "./utils/curatedPrompts";
+import { INITIAL_CURATED_PROMPTS, DrawingPrompt } from "./curatedPrompts";
 
 const ART_DIRECTOR_SYSTEM_INSTRUCTION = `Tu es le directeur artistique d'une application de dessin collectif ludique, sans pression et ouverte à tous les niveaux.
 Ta mission est de générer des consignes de dessin originales, bienveillantes et faciles à comprendre.
