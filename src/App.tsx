@@ -69,6 +69,7 @@ interface Challenge {
   is_open?: boolean;
   max_participants?: number;
   participants?: string[];
+  submission_mode?: "canvas" | "upload" | "both";
   created_at?: any;
 }
 
@@ -110,7 +111,7 @@ export function App() {
   const [newChallengeIsPublic, setNewChallengeIsPublic] = useState<boolean>(true);
   const [newChallengeCode, setNewChallengeCode] = useState<string>("");
   const [newChallengeMaxParticipants, setNewChallengeMaxParticipants] = useState<number>(50);
-  const [challengeToDelete, setChallengeToDelete] = useState<Challenge | null>(null);
+  const [newChallengeSubmissionMode, setNewChallengeSubmissionMode] = useState<"canvas" | "upload" | "both">("both");
 
   // Join Private Challenge State
   const [joinCodeInput, setJoinCodeInput] = useState<string>("");
@@ -235,42 +236,37 @@ export function App() {
     }
   };
 
-  const deleteChallenge = (challenge: Challenge, e: React.MouseEvent) => {
+  const deleteChallenge = async (challenge: Challenge, e: React.MouseEvent) => {
     e.stopPropagation();
-    setChallengeToDelete(challenge);
-  };
+    if (window.confirm(`Êtes-vous sûr de vouloir supprimer le challenge "${challenge.title}" ? Attention : TOUT sera supprimé de la base de données (le challenge, tous ses sujets et toutes les soumissions d'images associées). Cette action est irréversible.`)) {
+      const challengeId = challenge.id;
+      try {
+        // 1. Delete drawings
+        const drawingsQ = query(collection(db, "drawings"), where("challenge_id", "==", challengeId));
+        const drawingsSnap = await getDocs(drawingsQ);
+        for (const dSnap of drawingsSnap.docs) {
+          await deleteDoc(doc(db, "drawings", dSnap.id));
+        }
 
-  const confirmDeleteChallenge = async () => {
-    if (!challengeToDelete) return;
-    const challengeId = challengeToDelete.id;
+        // 2. Delete prompts
+        const promptsQ = query(collection(db, "prompts"), where("challenge_id", "==", challengeId));
+        const promptsSnap = await getDocs(promptsQ);
+        for (const pSnap of promptsSnap.docs) {
+          await deleteDoc(doc(db, "prompts", pSnap.id));
+        }
 
-    try {
-      // 1. Delete drawings
-      const drawingsQ = query(collection(db, "drawings"), where("challenge_id", "==", challengeId));
-      const drawingsSnap = await getDocs(drawingsQ);
-      for (const dSnap of drawingsSnap.docs) {
-        await deleteDoc(doc(db, "drawings", dSnap.id));
+        // 3. Delete challenge doc
+        await deleteDoc(doc(db, "challenges", challengeId));
+
+        // 4. Update local state so it is no longer displayed
+        setChallenges((prev) => prev.filter((c) => c.id !== challengeId));
+        if (activeChallenge?.id === challengeId) {
+          setActiveChallenge(null);
+        }
+      } catch (err) {
+        console.error("Error deleting challenge:", err);
+        alert("Erreur lors de la suppression du challenge de la base de données.");
       }
-
-      // 2. Delete prompts
-      const promptsQ = query(collection(db, "prompts"), where("challenge_id", "==", challengeId));
-      const promptsSnap = await getDocs(promptsQ);
-      for (const pSnap of promptsSnap.docs) {
-        await deleteDoc(doc(db, "prompts", pSnap.id));
-      }
-
-      // 3. Delete challenge doc
-      await deleteDoc(doc(db, "challenges", challengeId));
-
-      // 4. Update local state so it is no longer displayed
-      setChallenges((prev) => prev.filter((c) => c.id !== challengeId));
-      if (activeChallenge?.id === challengeId) {
-        setActiveChallenge(null);
-      }
-      setChallengeToDelete(null);
-    } catch (err) {
-      console.error("Error deleting challenge:", err);
-      alert("Erreur lors de la suppression du challenge de la base de données.");
     }
   };
 
@@ -503,6 +499,7 @@ export function App() {
         creator_name: currentUser.displayName || currentUser.email || "Créateur",
         is_public: newChallengeIsPublic,
         is_open: true,
+        submission_mode: newChallengeSubmissionMode,
         participants: [currentUser.uid],
         created_at: serverTimestamp(),
       };
@@ -529,6 +526,7 @@ export function App() {
         invite_code: challData.invite_code,
         is_open: true,
         max_participants: challData.max_participants,
+        submission_mode: newChallengeSubmissionMode,
         participants: [currentUser.uid],
         created_at: new Date(),
       };
@@ -555,6 +553,7 @@ export function App() {
       setNewChallengeIsPublic(true);
       setNewChallengeCode("");
       setNewChallengeMaxParticipants(50);
+      setNewChallengeSubmissionMode("both");
     } catch (err) {
       console.error("Error creating challenge:", err);
       alert("Erreur lors de la création du challenge.");
@@ -1047,6 +1046,7 @@ export function App() {
                 type="button"
                 onClick={() => {
                   setNewChallengeCode(generateUniqueCode());
+                  setNewChallengeSubmissionMode("both");
                   setShowCreateChallengeModal(true);
                 }}
                 className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl shadow-sm cursor-pointer transition-colors"
@@ -1275,6 +1275,22 @@ export function App() {
                   </select>
                 </div>
 
+                <div>
+                  <label className="block text-xs font-medium text-stone-700 mb-1">Outils de soumission autorisés *</label>
+                  <select
+                    value={newChallengeSubmissionMode}
+                    onChange={(e) => setNewChallengeSubmissionMode(e.target.value as any)}
+                    className="w-full px-3.5 py-2 text-xs border border-stone-300 rounded-xl bg-white focus:outline-none"
+                  >
+                    <option value="both">Les deux (Canvas numérique et Import photo)</option>
+                    <option value="canvas">Canvas numérique uniquement</option>
+                    <option value="upload">Import d'une photo du dessin uniquement</option>
+                  </select>
+                  <p className="text-[10px] text-stone-500 mt-1">
+                    Définissez les outils auxquels les participants auront accès pour soumettre leurs dessins.
+                  </p>
+                </div>
+
                 {newChallengeIsPublic ? (
                   <div>
                     <label className="block text-xs font-medium text-stone-700 mb-1">Limite de participants (50 max)</label>
@@ -1336,48 +1352,6 @@ export function App() {
           </div>
         )}
 
-        {/* Delete Confirmation Modal */}
-        {challengeToDelete && (
-          <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl p-6 max-w-md w-full space-y-4 shadow-2xl">
-              <div className="flex items-center justify-between pb-3 border-b border-stone-200">
-                <h3 className="text-base font-bold text-red-700 flex items-center gap-2">
-                  <Trash2 className="w-5 h-5" /> Confirmer la suppression
-                </h3>
-                <button
-                  type="button"
-                  onClick={() => setChallengeToDelete(null)}
-                  className="p-1 text-stone-400 hover:text-stone-700 rounded-lg cursor-pointer"
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-
-              <p className="text-xs text-stone-600 leading-relaxed">
-                Êtes-vous sûr de vouloir supprimer le challenge <strong className="text-stone-900">"{challengeToDelete.title}"</strong> ? 
-                <br /><br />
-                <span className="text-red-600 font-semibold">Attention :</span> TOUT sera supprimé définitivement de la base de données (le challenge, tous ses sujets et toutes les soumissions d'images associées) et le challenge ne sera plus affiché.
-              </p>
-
-              <div className="flex items-center gap-2 pt-3">
-                <button
-                  type="button"
-                  onClick={confirmDeleteChallenge}
-                  className="flex-1 py-2.5 text-xs font-semibold text-white bg-red-600 hover:bg-red-700 rounded-xl cursor-pointer"
-                >
-                  Supprimer définitivement
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setChallengeToDelete(null)}
-                  className="px-4 py-2.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded-xl cursor-pointer"
-                >
-                  Annuler
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
       </div>
     );
   }
@@ -1797,186 +1771,331 @@ export function App() {
 
             {/* Active Drawing Pad & Upload / Pending State / Rejection State */}
             <section className="space-y-6 pt-6 border-t border-stone-200">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <span className="text-xs font-semibold text-amber-800 uppercase tracking-wide">
-                    Sujet Actif en cours
-                  </span>
-                  <h2 className="text-xl font-semibold text-stone-900 mt-0.5">
-                    « {activePrompt.title} »
-                  </h2>
-                </div>
+              {(() => {
+                const submissionMode = activeChallenge?.submission_mode || "both";
+                const allowCanvas = submissionMode === "canvas" || submissionMode === "both";
+                const allowUpload = submissionMode === "upload" || submissionMode === "both";
 
-                {!isPending && (
-                  <div className="flex items-center gap-2">
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept="image/png,image/jpeg,image/webp"
-                      onChange={handleFileUpload}
-                      className="hidden"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-lg transition-colors cursor-pointer"
-                    >
-                      <Upload className="w-3.5 h-3.5 text-emerald-800" />
-                      Importer une image
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isSubmitting}
-                      onClick={handleManualSubmit}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
-                    >
-                      <ShieldCheck className="w-3.5 h-3.5" />
-                      {isSubmitting ? "Envoi en cours..." : "Envoi"}
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* Status Banners */}
-              {isPending && (
-                <div className="p-6 bg-amber-50 border border-amber-200 rounded-xl flex items-center gap-4 text-amber-900">
-                  <Clock className="w-6 h-6 text-amber-700 shrink-0" />
-                  <div className="space-y-1">
-                    <h3 className="text-sm font-semibold">En attente de validation par le créateur</h3>
-                    <p className="text-xs text-amber-800">Votre dessin a bien été soumis. La galerie et le sujet suivant sont temporairement verrouillés.</p>
-                  </div>
-                </div>
-              )}
-
-              {isRejected && (
-                <div className="p-6 bg-red-50 border border-red-200 rounded-xl flex items-center gap-4 text-red-900">
-                  <AlertCircle className="w-6 h-6 text-red-700 shrink-0" />
-                  <div className="space-y-1">
-                    <h3 className="text-sm font-semibold">Votre dessin n'a pas été validé.</h3>
-                    <p className="text-xs text-red-800">
-                      Motif : <strong className="font-semibold">{currentSub?.rejection_reason || "Non spécifié"}</strong>. Veuillez soumettre un nouveau dessin ci-dessous.
-                    </p>
-                  </div>
-                </div>
-              )}
-
-              {/* Canvas or Imported Image Preview */}
-              {!isPending && (
-                <div className="bg-white border border-stone-200 rounded-xl p-5 space-y-4 shadow-xs">
-                  {importedImageUrl ? (
-                    <div className="space-y-3">
-                      <div className="flex items-center justify-between text-xs text-stone-500">
-                        <span className="font-semibold text-emerald-800">Image importée prête pour l'envoi</span>
-                        <button
-                          type="button"
-                          onClick={() => setImportedImageUrl(null)}
-                          className="text-xs text-stone-600 underline hover:text-stone-900 cursor-pointer"
-                        >
-                          Repasser au canvas de dessin
-                        </button>
+                return (
+                  <>
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div>
+                        <span className="text-xs font-semibold text-amber-800 uppercase tracking-wide">
+                          Sujet Actif · Outil : {submissionMode === "canvas" ? "Canvas numérique" : submissionMode === "upload" ? "Import photo" : "Canvas & Import"}
+                        </span>
+                        <h2 className="text-xl font-semibold text-stone-900 mt-0.5">
+                          « {activePrompt.title} »
+                        </h2>
                       </div>
-                      <div className="rounded-lg border border-stone-300 overflow-hidden bg-[#FAF8F5] aspect-[16/10] flex items-center justify-center p-2">
-                        <img src={importedImageUrl} alt="Aperçu importé" className="max-h-full max-w-full object-contain rounded" />
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 bg-stone-50 border border-stone-200 rounded-lg">
-                        <div className="flex items-center gap-1">
-                          <button
-                            type="button"
-                            onClick={() => setTool("pen")}
-                            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                              tool === "pen" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
-                            }`}
-                          >
-                            Fusain
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setTool("watercolor")}
-                            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                              tool === "watercolor" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
-                            }`}
-                          >
-                            Aquarelle
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setTool("eraser")}
-                            className={`inline-flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                              tool === "eraser" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
-                            }`}
-                          >
-                            <Eraser className="w-3 h-3" />
-                            Gomme
-                          </button>
-                        </div>
 
+                      {!isPending && (
                         <div className="flex items-center gap-2">
-                          {PALETTE.map((p) => (
+                          {allowUpload && (
+                            <>
+                              <input
+                                ref={fileInputRef}
+                                type="file"
+                                accept="image/png,image/jpeg,image/webp"
+                                onChange={handleFileUpload}
+                                className="hidden"
+                              />
+                              <button
+                                type="button"
+                                onClick={() => fileInputRef.current?.click()}
+                                className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-lg transition-colors cursor-pointer"
+                              >
+                                <Upload className="w-3.5 h-3.5 text-emerald-800" />
+                                {importedImageUrl ? "Changer l'image" : "Importer une image"}
+                              </button>
+                            </>
+                          )}
+                          {((allowUpload && importedImageUrl) || allowCanvas) && (
                             <button
-                              key={p.hex}
                               type="button"
-                              title={p.name}
-                              onClick={() => {
-                                setColor(p.hex);
-                                if (tool === "eraser") setTool("pen");
-                              }}
-                              className={`w-5 h-5 rounded-full transition-transform ${
-                                color === p.hex && tool !== "eraser" ? "scale-115 ring-2 ring-stone-900" : "hover:scale-105"
-                              }`}
-                              style={{ backgroundColor: p.hex }}
-                            />
-                          ))}
+                              disabled={isSubmitting || (submissionMode === "upload" && !importedImageUrl)}
+                              onClick={handleManualSubmit}
+                              className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-900 rounded-lg transition-colors cursor-pointer disabled:opacity-50"
+                            >
+                              <ShieldCheck className="w-3.5 h-3.5" />
+                              {isSubmitting ? "Envoi en cours..." : "Envoi"}
+                            </button>
+                          )}
                         </div>
-
-                        <div className="flex items-center gap-2">
-                          <label className="flex items-center gap-1 text-xs text-stone-600">
-                            <span>Taille</span>
-                            <input
-                              type="range"
-                              min={2}
-                              max={14}
-                              value={brushSize}
-                              onChange={(e) => setBrushSize(Number(e.target.value))}
-                              className="w-14 accent-stone-900"
-                            />
-                          </label>
-                          <button type="button" onClick={() => {}} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Annuler">
-                            <RotateCcw className="w-3.5 h-3.5" />
-                          </button>
-                          <button type="button" onClick={handleClearCanvas} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Effacer">
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      </div>
-
-                      <div className="rounded-lg border border-stone-300 overflow-hidden bg-[#FAF8F5]">
-                        <canvas
-                          ref={canvasRef}
-                          width={640}
-                          height={380}
-                          onMouseDown={startDraw}
-                          onMouseMove={draw}
-                          onMouseUp={endDraw}
-                          onMouseLeave={endDraw}
-                          onTouchStart={startDraw}
-                          onTouchMove={draw}
-                          onTouchEnd={endDraw}
-                          className="w-full aspect-[16/10] cursor-crosshair touch-none block"
-                        />
-                      </div>
-                    </>
-                  )}
-
-                  {submissionError && (
-                    <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
-                      {submissionError}
+                      )}
                     </div>
-                  )}
-                </div>
-              )}
+
+                    {/* Status Banners */}
+                    {isPending && (
+                      <div className="p-6 bg-amber-50 border border-amber-200 rounded-xl flex items-center gap-4 text-amber-900">
+                        <Clock className="w-6 h-6 text-amber-700 shrink-0" />
+                        <div className="space-y-1">
+                          <h3 className="text-sm font-semibold">En attente de validation par le créateur</h3>
+                          <p className="text-xs text-amber-800">Votre dessin a bien été soumis. La galerie et le sujet suivant sont temporairement verrouillés.</p>
+                        </div>
+                      </div>
+                    )}
+
+                    {isRejected && (
+                      <div className="p-6 bg-red-50 border border-red-200 rounded-xl flex items-center gap-4 text-red-900">
+                        <AlertCircle className="w-6 h-6 text-red-700 shrink-0" />
+                        <div className="space-y-1">
+                          <h3 className="text-sm font-semibold">Votre dessin n'a pas été validé.</h3>
+                          <p className="text-xs text-red-800">
+                            Motif : <strong className="font-semibold">{currentSub?.rejection_reason || "Non spécifié"}</strong>. Veuillez soumettre un nouveau dessin ci-dessous.
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Workspace based on submissionMode */}
+                    {!isPending && (
+                      <div className="bg-white border border-stone-200 rounded-xl p-5 space-y-4 shadow-xs">
+                        {submissionMode === "upload" ? (
+                          <div className="space-y-3">
+                            {importedImageUrl ? (
+                              <div className="space-y-3">
+                                <div className="flex items-center justify-between text-xs text-stone-500">
+                                  <span className="font-semibold text-emerald-800">Image importée prête pour l'envoi</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setImportedImageUrl(null)}
+                                    className="text-xs text-stone-600 underline hover:text-stone-900 cursor-pointer"
+                                  >
+                                    Changer d'image
+                                  </button>
+                                </div>
+                                <div className="rounded-lg border border-stone-300 overflow-hidden bg-[#FAF8F5] aspect-[16/10] flex items-center justify-center p-2">
+                                  <img src={importedImageUrl} alt="Aperçu importé" className="max-h-full max-w-full object-contain rounded" />
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="p-12 border-2 border-dashed border-stone-300 rounded-xl text-center space-y-3 bg-stone-50">
+                                <Upload className="w-10 h-10 text-stone-400 mx-auto" />
+                                <div className="space-y-1">
+                                  <h4 className="text-sm font-semibold text-stone-900">Ce challenge requiert l'import d'une photo</h4>
+                                  <p className="text-xs text-stone-500">Cliquez sur "Importer une image" ci-dessus pour sélectionner la photo de votre dessin.</p>
+                                </div>
+                                <button
+                                  type="button"
+                                  onClick={() => fileInputRef.current?.click()}
+                                  className="px-4 py-2 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-lg cursor-pointer"
+                                >
+                                  Sélectionner une photo
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        ) : submissionMode === "canvas" ? (
+                          <>
+                            <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 bg-stone-50 border border-stone-200 rounded-lg">
+                              <div className="flex items-center gap-1">
+                                <button
+                                  type="button"
+                                  onClick={() => setTool("pen")}
+                                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                                    tool === "pen" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
+                                  }`}
+                                >
+                                  Fusain
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setTool("watercolor")}
+                                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                                    tool === "watercolor" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
+                                  }`}
+                                >
+                                  Aquarelle
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setTool("eraser")}
+                                  className={`inline-flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                                    tool === "eraser" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
+                                  }`}
+                                >
+                                  <Eraser className="w-3 h-3" />
+                                  Gomme
+                                </button>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                {PALETTE.map((p) => (
+                                  <button
+                                    key={p.hex}
+                                    type="button"
+                                    title={p.name}
+                                    onClick={() => {
+                                      setColor(p.hex);
+                                      if (tool === "eraser") setTool("pen");
+                                    }}
+                                    className={`w-5 h-5 rounded-full transition-transform ${
+                                      color === p.hex && tool !== "eraser" ? "scale-115 ring-2 ring-stone-900" : "hover:scale-105"
+                                    }`}
+                                    style={{ backgroundColor: p.hex }}
+                                  />
+                                ))}
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <label className="flex items-center gap-1 text-xs text-stone-600">
+                                  <span>Taille</span>
+                                  <input
+                                    type="range"
+                                    min={2}
+                                    max={14}
+                                    value={brushSize}
+                                    onChange={(e) => setBrushSize(Number(e.target.value))}
+                                    className="w-14 accent-stone-900"
+                                  />
+                                </label>
+                                <button type="button" onClick={() => {}} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Annuler">
+                                  <RotateCcw className="w-3.5 h-3.5" />
+                                </button>
+                                <button type="button" onClick={handleClearCanvas} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Effacer">
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="rounded-lg border border-stone-300 overflow-hidden bg-[#FAF8F5]">
+                              <canvas
+                                ref={canvasRef}
+                                width={640}
+                                height={380}
+                                onMouseDown={startDraw}
+                                onMouseMove={draw}
+                                onMouseUp={endDraw}
+                                onMouseLeave={endDraw}
+                                onTouchStart={startDraw}
+                               onTouchMove={draw}
+                                onTouchEnd={endDraw}
+                                className="w-full aspect-[16/10] cursor-crosshair touch-none block"
+                              />
+                            </div>
+                          </>
+                        ) : (
+                          /* Both canvas and upload */
+                          <>
+                            {importedImageUrl ? (
+                              <div className="space-y-3">
+                                <div className="flex items-center justify-between text-xs text-stone-500">
+                                  <span className="font-semibold text-emerald-800">Image importée prête pour l'envoi</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => setImportedImageUrl(null)}
+                                    className="text-xs text-stone-600 underline hover:text-stone-900 cursor-pointer"
+                                  >
+                                    Repasser au canvas de dessin
+                                  </button>
+                                </div>
+                                <div className="rounded-lg border border-stone-300 overflow-hidden bg-[#FAF8F5] aspect-[16/10] flex items-center justify-center p-2">
+                                  <img src={importedImageUrl} alt="Aperçu importé" className="max-h-full max-w-full object-contain rounded" />
+                                </div>
+                              </div>
+                            ) : (
+                              <>
+                                <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 bg-stone-50 border border-stone-200 rounded-lg">
+                                  <div className="flex items-center gap-1">
+                                    <button
+                                      type="button"
+                                      onClick={() => setTool("pen")}
+                                      className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                                        tool === "pen" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
+                                      }`}
+                                    >
+                                      Fusain
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setTool("watercolor")}
+                                      className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                                        tool === "watercolor" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
+                                      }`}
+                                    >
+                                      Aquarelle
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setTool("eraser")}
+                                      className={`inline-flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+                                        tool === "eraser" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
+                                      }`}
+                                    >
+                                      <Eraser className="w-3 h-3" />
+                                      Gomme
+                                    </button>
+                                  </div>
+
+                                  <div className="flex items-center gap-2">
+                                    {PALETTE.map((p) => (
+                                      <button
+                                        key={p.hex}
+                                        type="button"
+                                        title={p.name}
+                                        onClick={() => {
+                                          setColor(p.hex);
+                                          if (tool === "eraser") setTool("pen");
+                                        }}
+                                        className={`w-5 h-5 rounded-full transition-transform ${
+                                          color === p.hex && tool !== "eraser" ? "scale-115 ring-2 ring-stone-900" : "hover:scale-105"
+                                        }`}
+                                        style={{ backgroundColor: p.hex }}
+                                      />
+                                    ))}
+                                  </div>
+
+                                  <div className="flex items-center gap-2">
+                                    <label className="flex items-center gap-1 text-xs text-stone-600">
+                                      <span>Taille</span>
+                                      <input
+                                        type="range"
+                                        min={2}
+                                        max={14}
+                                        value={brushSize}
+                                        onChange={(e) => setBrushSize(Number(e.target.value))}
+                                        className="w-14 accent-stone-900"
+                                      />
+                                    </label>
+                                    <button type="button" onClick={() => {}} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Annuler">
+                                      <RotateCcw className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button type="button" onClick={handleClearCanvas} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Effacer">
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </div>
+
+                                <div className="rounded-lg border border-stone-300 overflow-hidden bg-[#FAF8F5]">
+                                  <canvas
+                                    ref={canvasRef}
+                                    width={640}
+                                    height={380}
+                                    onMouseDown={startDraw}
+                                    onMouseMove={draw}
+                                    onMouseUp={endDraw}
+                                    onMouseLeave={endDraw}
+                                    onTouchStart={startDraw}
+                                    onTouchMove={draw}
+                                    onTouchEnd={endDraw}
+                                    className="w-full aspect-[16/10] cursor-crosshair touch-none block"
+                                  />
+                                </div>
+                              </>
+                            )}
+                          </>
+                        )}
+
+                        {submissionError && (
+                          <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-xs text-red-800">
+                            {submissionError}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </section>
 
             {/* Cloistered Gallery */}
