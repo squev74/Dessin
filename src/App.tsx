@@ -170,6 +170,99 @@ export function App() {
   const [customThemeInput, setCustomThemeInput] = useState<string>("");
   const [promptError, setPromptError] = useState<string | null>(null);
 
+  // Notification States
+  const [creatorPendingMap, setCreatorPendingMap] = useState<Record<string, number>>({});
+  const [participantApprovedMap, setParticipantApprovedMap] = useState<Record<string, string[]>>({});
+
+  useEffect(() => {
+    if (!currentUser || challenges.length === 0) return;
+    const computeNotifications = async () => {
+      try {
+        const pendingMap: Record<string, number> = {};
+        const approvedMap: Record<string, string[]> = {};
+
+        const viewedPending = (userProfile as any)?.viewedPendingChallenges || {};
+        const viewedApproved = (userProfile as any)?.viewedApprovedSubmissions || {};
+
+        const drawingsSnap = await getDocs(collection(db, "drawings"));
+        drawingsSnap.forEach((docSnap) => {
+          const d = docSnap.data() as DrawingSubmission;
+          const challId = d.challenge_id;
+          if (!challId) return;
+
+          const challenge = challenges.find((c) => c.id === challId);
+          if (!challenge) return;
+
+          // Creator notification: pending submissions by others
+          if (challenge.creator_id === currentUser.uid && d.status === "PENDING" && d.user_id !== currentUser.uid) {
+            pendingMap[challId] = (pendingMap[challId] || 0) + 1;
+          }
+
+          // Participant notification: approved submissions by current user
+          if (challenge.creator_id !== currentUser.uid && d.user_id === currentUser.uid && d.status === "APPROVED") {
+            const viewedPrompts = viewedApproved[challId] || [];
+            if (!viewedPrompts.includes(d.prompt_id)) {
+              if (!approvedMap[challId]) approvedMap[challId] = [];
+              if (!approvedMap[challId].includes(d.prompt_id)) {
+                approvedMap[challId].push(d.prompt_id);
+              }
+            }
+          }
+        });
+
+        setCreatorPendingMap(pendingMap);
+        setParticipantApprovedMap(approvedMap);
+      } catch (err) {
+        console.error("Error computing notifications:", err);
+      }
+    };
+
+    computeNotifications();
+  }, [currentUser, challenges, userProfile]);
+
+  const markPendingViewed = async (challengeId: string) => {
+    if (!currentUser) return;
+    const viewedPending = { ...((userProfile as any)?.viewedPendingChallenges || {}), [challengeId]: Date.now() };
+    const updatedProfile = { ...(userProfile || {}), viewedPendingChallenges: viewedPending };
+    setUserProfile(updatedProfile);
+    setCreatorPendingMap((prev) => ({ ...prev, [challengeId]: 0 }));
+    try {
+      await updateDoc(doc(db, "users", currentUser.uid), { viewedPendingChallenges: viewedPending });
+    } catch {
+      await setDoc(doc(db, "users", currentUser.uid), { viewedPendingChallenges: viewedPending }, { merge: true });
+    }
+  };
+
+  const markPromptApprovedViewed = async (challengeId: string, promptId: string) => {
+    if (!currentUser) return;
+    const viewedApproved = { ...((userProfile as any)?.viewedApprovedSubmissions || {}) };
+    const promptList = viewedApproved[challengeId] || [];
+    if (!promptList.includes(promptId)) {
+      viewedApproved[challengeId] = [...promptList, promptId];
+      const updatedProfile = { ...(userProfile || {}), viewedApprovedSubmissions: viewedApproved };
+      setUserProfile(updatedProfile);
+      setParticipantApprovedMap((prev) => {
+        const currentList = prev[challengeId] || [];
+        const newList = currentList.filter((id) => id !== promptId);
+        return { ...prev, [challengeId]: newList };
+      });
+      try {
+        await updateDoc(doc(db, "users", currentUser.uid), { viewedApprovedSubmissions: viewedApproved });
+      } catch {
+        await setDoc(doc(db, "users", currentUser.uid), { viewedApprovedSubmissions: viewedApproved }, { merge: true });
+      }
+    }
+  };
+
+  useEffect(() => {
+    if (!activeChallenge || !currentUser) return;
+    if (activeChallenge.creator_id === currentUser.uid) {
+      markPendingViewed(activeChallenge.id);
+    }
+  }, [activeChallenge, currentUser]);
+
+
+
   const generateUniqueCode = () => {
     const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     let code = "ART-";
@@ -446,6 +539,13 @@ export function App() {
   useEffect(() => {
     setImportedImageUrl(null);
   }, [activePrompt]);
+
+  useEffect(() => {
+    if (!activeChallenge || !activePrompt || !currentUser) return;
+    if (activeChallenge.creator_id !== currentUser.uid) {
+      markPromptApprovedViewed(activeChallenge.id, activePrompt.id);
+    }
+  }, [activePrompt, activeChallenge, currentUser]);
 
   // Load gallery for activePrompt
   useEffect(() => {
@@ -1101,9 +1201,16 @@ export function App() {
                         <span className={`px-2.5 py-1 text-[10px] font-mono font-bold rounded-full ${c.is_open !== false ? 'bg-emerald-100 text-emerald-800' : 'bg-red-100 text-red-800'}`}>
                           {c.is_open !== false ? 'Ouvert' : 'Fermé'}
                         </span>
-                        <span className="text-xs text-stone-500 font-mono">
-                          {c.is_public ? `Public (${c.participants?.length || 1}/${c.max_participants || 50})` : `Privé (${c.invite_code || ''})`}
-                        </span>
+                        {creatorPendingMap[c.id] > 0 ? (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-bold bg-amber-100 text-amber-900 rounded-full animate-pulse shadow-xs">
+                            <span className="w-2 h-2 rounded-full bg-amber-700"></span>
+                            {creatorPendingMap[c.id]} nouvelle(s) soumission(s)
+                          </span>
+                        ) : (
+                          <span className="text-xs text-stone-500 font-mono">
+                            {c.is_public ? `Public (${c.participants?.length || 1}/${c.max_participants || 50})` : `Privé (${c.invite_code || ''})`}
+                          </span>
+                        )}
                       </div>
                       <h3 className="text-base font-bold text-stone-900 group-hover:text-amber-950 transition-colors">
                         {c.title}
@@ -1160,9 +1267,16 @@ export function App() {
                         <span className="px-2.5 py-1 text-[10px] font-mono font-bold bg-emerald-100 text-emerald-800 rounded-full">
                           Rejoint
                         </span>
-                        <span className="text-xs text-stone-500 font-mono">
-                          {c.is_public ? "Public" : "Privé"}
-                        </span>
+                        {participantApprovedMap[c.id]?.length > 0 ? (
+                          <span className="inline-flex items-center gap-1.5 px-2.5 py-1 text-[10px] font-bold bg-emerald-100 text-emerald-900 rounded-full animate-pulse shadow-xs">
+                            <span className="w-2 h-2 rounded-full bg-emerald-700"></span>
+                            {participantApprovedMap[c.id].length} dessin(s) validé(s)
+                          </span>
+                        ) : (
+                          <span className="text-xs text-stone-500 font-mono">
+                            {c.is_public ? "Public" : "Privé"}
+                          </span>
+                        )}
                       </div>
                       <h3 className="text-base font-bold text-stone-900 group-hover:text-emerald-900 transition-colors">
                         {c.title}
@@ -1731,7 +1845,12 @@ export function App() {
                         key={p.id}
                         type="button"
                         disabled={!isUnlocked && !isCreator}
-                        onClick={() => setActivePromptIndex(index)}
+                        onClick={() => {
+                          setActivePromptIndex(index);
+                          if (activeChallenge && !isCreator) {
+                            markPromptApprovedViewed(activeChallenge.id, p.id);
+                          }
+                        }}
                         className={`p-3.5 rounded-xl border text-left transition-all flex flex-col justify-between gap-3 relative overflow-hidden cursor-pointer ${
                           isActive
                             ? "border-amber-900 bg-amber-50/60 ring-2 ring-amber-900/20 shadow-xs"
@@ -1740,6 +1859,12 @@ export function App() {
                               : "border-stone-200 bg-stone-100/70 opacity-65 cursor-not-allowed"
                         }`}
                       >
+                        {!isCreator && activeChallenge && participantApprovedMap[activeChallenge.id]?.includes(p.id) && (
+                          <span className="absolute top-2 right-2 flex h-3 w-3 items-center justify-center">
+                            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                            <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-600"></span>
+                          </span>
+                        )}
                         <div className="space-y-1">
                           <div className="flex items-center justify-between text-[11px] text-stone-500">
                             <span className="font-mono font-bold">Étape 0{index + 1}</span>
