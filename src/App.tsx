@@ -144,10 +144,101 @@ export function App() {
 
   // Lightbox & Zoom state
   const [lightboxImageUrl, setLightboxImageUrl] = useState<string | null>(null);
+  const [lightboxIndex, setLightboxIndex] = useState<number>(0);
   const [zoomScale, setZoomScale] = useState<number>(1);
   const [panOffset, setPanOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [isDraggingImage, setIsDraggingImage] = useState<boolean>(false);
   const [dragStart, setDragStart] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [touchStartPos, setTouchStartPos] = useState<{ x: number; y: number } | null>(null);
+  const [initialPinchDist, setInitialPinchDist] = useState<number | null>(null);
+  const [baseZoomScale, setBaseZoomScale] = useState<number>(1);
+
+  const openLightbox = (index: number) => {
+    setLightboxIndex(index);
+    setLightboxImageUrl(galleryDrawings[index]?.imageUrl || null);
+    setZoomScale(1);
+    setPanOffset({ x: 0, y: 0 });
+  };
+
+  const handlePrevLightbox = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    if (galleryDrawings.length === 0) return;
+    const newIdx = (lightboxIndex - 1 + galleryDrawings.length) % galleryDrawings.length;
+    setLightboxIndex(newIdx);
+    setLightboxImageUrl(galleryDrawings[newIdx].imageUrl);
+    setZoomScale(1);
+    setPanOffset({ x: 0, y: 0 });
+  };
+
+  const handleNextLightbox = (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    if (galleryDrawings.length === 0) return;
+    const newIdx = (lightboxIndex + 1) % galleryDrawings.length;
+    setLightboxIndex(newIdx);
+    setLightboxImageUrl(galleryDrawings[newIdx].imageUrl);
+    setZoomScale(1);
+    setPanOffset({ x: 0, y: 0 });
+  };
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (e.touches.length === 2) {
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      setInitialPinchDist(dist);
+      setBaseZoomScale(zoomScale);
+    } else if (e.touches.length === 1) {
+      setTouchStartPos({ x: e.touches[0].clientX, y: e.touches[0].clientY });
+      if (zoomScale > 1) {
+        setIsDraggingImage(true);
+        setDragStart({ x: e.touches[0].clientX - panOffset.x, y: e.touches[0].clientY - panOffset.y });
+      }
+    }
+  };
+
+  const handleTouchMove = (e: React.TouchEvent) => {
+    if (e.touches.length === 2 && initialPinchDist !== null) {
+      e.preventDefault();
+      const dist = Math.hypot(
+        e.touches[0].clientX - e.touches[1].clientX,
+        e.touches[0].clientY - e.touches[1].clientY
+      );
+      const scaleFactor = dist / initialPinchDist;
+      const newScale = Math.min(Math.max(baseZoomScale * scaleFactor, 1), 4);
+      setZoomScale(newScale);
+      if (newScale <= 1) {
+        setPanOffset({ x: 0, y: 0 });
+      }
+    } else if (e.touches.length === 1) {
+      if (isDraggingImage && zoomScale > 1) {
+        setPanOffset({ x: e.touches[0].clientX - dragStart.x, y: e.touches[0].clientY - dragStart.y });
+      }
+    }
+  };
+
+  const handleTouchEnd = (e: React.TouchEvent) => {
+    if (e.touches.length < 2) {
+      setInitialPinchDist(null);
+    }
+    if (e.touches.length === 0) {
+      setIsDraggingImage(false);
+      if (zoomScale === 1 && touchStartPos && e.changedTouches.length > 0) {
+        const touchEnd = e.changedTouches[0];
+        const diffX = touchEnd.clientX - touchStartPos.x;
+        const diffY = Math.abs(touchEnd.clientY - touchStartPos.y);
+
+        if (Math.abs(diffX) > 50 && diffY < 100) {
+          if (diffX > 0) {
+            handlePrevLightbox();
+          } else {
+            handleNextLightbox();
+          }
+        }
+      }
+      setTouchStartPos(null);
+    }
+  };
 
   // Creator Moderation Pending Submissions
   const [pendingSubmissions, setPendingSubmissions] = useState<DrawingSubmission[]>([]);
@@ -2252,17 +2343,13 @@ export function App() {
                 </div>
               ) : (
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
-                  {galleryDrawings.map((item) => (
+                  {galleryDrawings.map((item, idx) => (
                     <div key={item.id} className="relative group aspect-square bg-white border border-stone-200 rounded-xl overflow-hidden shadow-xs hover:shadow-md transition-shadow">
                       <img
                         src={item.imageUrl}
                         alt="Dessin validé de la fresque"
                         referrerPolicy="no-referrer"
-                        onClick={() => {
-                          setLightboxImageUrl(item.imageUrl);
-                          setZoomScale(1);
-                          setPanOffset({ x: 0, y: 0 });
-                        }}
+                        onClick={() => openLightbox(idx)}
                         className="w-full h-full object-cover block cursor-zoom-in"
                       />
                       {isCreator && (
@@ -2287,45 +2374,76 @@ export function App() {
         )}
       </main>
 
-      {/* Lightbox / Fullscreen Touch Zoom Modal */}
+      {/* Lightbox / Fullscreen Touch Zoom & Swipe Modal */}
       {lightboxImageUrl && (
         <div
-          className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center overflow-hidden touch-none"
+          className="fixed inset-0 z-50 bg-black/95 flex items-center justify-center overflow-hidden touch-none select-none"
           onClick={() => setLightboxImageUrl(null)}
+          onTouchStart={handleTouchStart}
+          onTouchMove={handleTouchMove}
+          onTouchEnd={handleTouchEnd}
         >
-          <div className="absolute top-4 right-4 flex items-center gap-2 z-50">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setZoomScale((prev) => Math.min(prev + 0.5, 4));
-              }}
-              className="p-2.5 bg-white/10 hover:bg-white/20 text-white rounded-full cursor-pointer backdrop-blur-sm"
-              title="Zoom +"
-            >
-              <ZoomIn className="w-5 h-5" />
-            </button>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setZoomScale((prev) => Math.max(prev - 0.5, 1));
-                if (zoomScale <= 1.5) setPanOffset({ x: 0, y: 0 });
-              }}
-              className="p-2.5 bg-white/10 hover:bg-white/20 text-white rounded-full cursor-pointer backdrop-blur-sm"
-              title="Zoom -"
-            >
-              <ZoomOut className="w-5 h-5" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setLightboxImageUrl(null)}
-              className="p-2.5 bg-white/10 hover:bg-white/20 text-white rounded-full cursor-pointer backdrop-blur-sm"
-              title="Fermer"
-            >
-              <X className="w-5 h-5" />
-            </button>
+          {/* Top Bar: Counter & Actions */}
+          <div className="absolute top-4 left-4 right-4 flex items-center justify-between z-50 px-4">
+            <span className="text-xs font-mono font-bold text-white/90 bg-white/10 px-3 py-1.5 rounded-full backdrop-blur-sm">
+              {lightboxIndex + 1} / {galleryDrawings.length}
+            </span>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setZoomScale((prev) => Math.min(prev + 0.5, 4));
+                }}
+                className="p-2.5 bg-white/10 hover:bg-white/20 text-white rounded-full cursor-pointer backdrop-blur-sm"
+                title="Zoom +"
+              >
+                <ZoomIn className="w-5 h-5" />
+              </button>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setZoomScale((prev) => Math.max(prev - 0.5, 1));
+                  if (zoomScale <= 1.5) setPanOffset({ x: 0, y: 0 });
+                }}
+                className="p-2.5 bg-white/10 hover:bg-white/20 text-white rounded-full cursor-pointer backdrop-blur-sm"
+                title="Zoom -"
+              >
+                <ZoomOut className="w-5 h-5" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setLightboxImageUrl(null)}
+                className="p-2.5 bg-white/10 hover:bg-white/20 text-white rounded-full cursor-pointer backdrop-blur-sm"
+                title="Fermer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
           </div>
+
+          {/* Navigation Arrows */}
+          {galleryDrawings.length > 1 && (
+            <>
+              <button
+                type="button"
+                onClick={handlePrevLightbox}
+                className="absolute left-4 top-1/2 -translate-y-1/2 p-3 bg-white/10 hover:bg-white/25 text-white rounded-full z-50 backdrop-blur-sm cursor-pointer"
+                title="Photo précédente"
+              >
+                ←
+              </button>
+              <button
+                type="button"
+                onClick={handleNextLightbox}
+                className="absolute right-4 top-1/2 -translate-y-1/2 p-3 bg-white/10 hover:bg-white/25 text-white rounded-full z-50 backdrop-blur-sm cursor-pointer"
+                title="Photo suivante"
+              >
+                →
+              </button>
+            </>
+          )}
 
           <div
             className="w-full h-full flex items-center justify-center p-4 overflow-hidden select-none"
