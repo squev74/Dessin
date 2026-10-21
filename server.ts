@@ -39,11 +39,11 @@ Chaque élément doit posséder :
 
 const MODERATION_SYSTEM_INSTRUCTION = `Tu es l'agent de modération automatique d'une application de dessin collectif. Réponds strictement au format JSON demandé.`;
 
-function getAiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
+function getAiClient(providedApiKey?: string): GoogleGenAI {
+  const apiKey = providedApiKey || process.env.GEMINI_API_KEY;
   if (!apiKey) {
     throw new Error(
-      "La clé GEMINI_API_KEY n'est pas configurée dans l'environnement."
+      "La clé GEMINI_API_KEY n'est pas configurée dans l'environnement ni fournie."
     );
   }
 
@@ -95,9 +95,10 @@ async function startServer() {
         theme = "libre",
         requestedCategory,
         requestedDifficulty,
+        apiKey,
       } = req.body;
 
-      const ai = getAiClient();
+      const ai = getAiClient(apiKey);
 
       let userPrompt = `Génère exactement ${count} consignes de dessin bienveillantes et variées.`;
       if (theme && theme !== "libre") {
@@ -159,13 +160,14 @@ async function startServer() {
         support = "N/A",
         intention = "Aucune",
         level = "Tous niveaux",
+        apiKey,
       } = req.body;
 
       if (!image_url) {
         return res.status(400).json({ error: "Image manquante." });
       }
 
-      const ai = getAiClient();
+      const ai = getAiClient(apiKey);
 
       // Extract base64 part if data url or fetch if remote URL
       let base64Data = image_url;

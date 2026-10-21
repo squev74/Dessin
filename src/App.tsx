@@ -158,6 +158,8 @@ export function App() {
     setAiError(null);
 
     try {
+      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem("artguard_gemini_key") || "";
+
       const res = await fetch("/api/analyze-drawing", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -169,15 +171,26 @@ export function App() {
           support: aiCreationType === "traditionnel" ? aiSupport : "Écran / Canvas numérique",
           intention: aiIntention,
           level: aiLevel,
+          apiKey,
         }),
       });
 
-      if (!res.ok) {
-        const errData = await res.json();
-        throw new Error(errData.error || "Erreur lors de l'analyse IA.");
+      const text = await res.text();
+      let data: any = {};
+      try {
+        data = JSON.parse(text);
+      } catch {
+        if (text.trim().startsWith("<")) {
+          throw new Error("Erreur serveur (HTML reçu au lieu de JSON). Vérifiez la configuration de l'API Key Gemini.");
+        }
+        throw new Error(text || "Erreur lors de l'analyse IA.");
       }
 
-      const feedback = await res.json();
+      if (!res.ok) {
+        throw new Error(data.error || "Erreur lors de l'analyse IA.");
+      }
+
+      const feedback = data;
 
       const subRef = doc(db, "drawings", sub.id);
       await updateDoc(subRef, { ai_feedback: feedback });
