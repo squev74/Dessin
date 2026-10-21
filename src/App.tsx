@@ -56,7 +56,7 @@ import {
   INITIAL_CURATED_PROMPTS,
   THEME_PRESETS,
 } from "./utils/curatedPrompts";
-import { generatePromptsClientSide } from "./utils/geminiClient";
+import { generatePromptsClientSide, analyzeDrawingClientSide } from "./utils/geminiClient";
 
 interface Challenge {
   id: string;
@@ -158,39 +158,25 @@ export function App() {
     setAiError(null);
 
     try {
-      const apiKey = import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem("artguard_gemini_key") || "";
-
-      const res = await fetch("/api/analyze-drawing", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          image_url: sub.image_url,
-          prompt_title: activePrompt.title,
-          creation_type: aiCreationType,
-          medium: aiCreationType === "traditionnel" ? aiMedium : "Dessin numérique",
-          support: aiCreationType === "traditionnel" ? aiSupport : "Écran / Canvas numérique",
-          intention: aiIntention,
-          level: aiLevel,
-          apiKey,
-        }),
-      });
-
-      const text = await res.text();
-      let data: any = {};
-      try {
-        data = JSON.parse(text);
-      } catch {
-        if (text.trim().startsWith("<")) {
-          throw new Error("Erreur serveur (HTML reçu au lieu de JSON). Vérifiez la configuration de l'API Key Gemini.");
+      let apiKey = import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem("artguard_gemini_key");
+      if (!apiKey) {
+        apiKey = prompt("Veuillez entrer votre clé API Gemini pour l'analyse :") || "";
+        if (apiKey) {
+          localStorage.setItem("artguard_gemini_key", apiKey);
+        } else {
+          throw new Error("Clé API Gemini requise.");
         }
-        throw new Error(text || "Erreur lors de l'analyse IA.");
       }
 
-      if (!res.ok) {
-        throw new Error(data.error || "Erreur lors de l'analyse IA.");
-      }
-
-      const feedback = data;
+      const feedback = await analyzeDrawingClientSide(apiKey, {
+        image_url: sub.image_url,
+        prompt_title: activePrompt.title,
+        creation_type: aiCreationType,
+        medium: aiCreationType === "traditionnel" ? aiMedium : "Dessin numérique",
+        support: aiCreationType === "traditionnel" ? aiSupport : "Écran / Canvas numérique",
+        intention: aiIntention,
+        level: aiLevel,
+      });
 
       const subRef = doc(db, "drawings", sub.id);
       await updateDoc(subRef, { ai_feedback: feedback });

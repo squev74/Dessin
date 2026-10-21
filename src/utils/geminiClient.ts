@@ -90,3 +90,114 @@ export async function generatePromptsClientSide(
 
   return compressed;
 }
+
+export async function analyzeDrawingClientSide(
+  apiKey: string,
+  params: {
+    image_url: string;
+    prompt_title: string;
+    creation_type: string;
+    medium: string;
+    support: string;
+    intention: string;
+    level: string;
+  }
+): Promise<{ encouragement: string; tips: string[] }> {
+  if (!apiKey) {
+    throw new Error("Clé API Gemini requise pour l'analyse.");
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  let base64Data = params.image_url;
+  let mimeType = "image/webp";
+  if (params.image_url.startsWith("data:")) {
+    const matches = params.image_url.match(/^data:(.+?);base64,(.+)$/);
+    if (matches) {
+      mimeType = matches[1];
+      base64Data = matches[2];
+    }
+  } else if (params.image_url.startsWith("http://") || params.image_url.startsWith("https://")) {
+    try {
+      const fetchRes = await fetch(params.image_url);
+      const arrayBuffer = await fetchRes.arrayBuffer();
+      const bytes = new Uint8Array(arrayBuffer);
+      let binary = "";
+      for (let i = 0; i < bytes.byteLength; i++) {
+        binary += String.fromCharCode(bytes[i]);
+      }
+      base64Data = btoa(binary);
+      const contentType = fetchRes.headers.get("content-type");
+      if (contentType) {
+        mimeType = contentType.split(";")[0].trim();
+      }
+    } catch (fetchErr) {
+      console.error("Error fetching image from URL in browser:", fetchErr);
+    }
+  }
+
+  const analysisPrompt = `Analyse ce dessin réalisé dans le cadre du challenge artistique.
+Consigne du sujet : "${params.prompt_title || "Libre"}"
+Type de création : ${params.creation_type}
+Médium utilisé : ${params.medium}
+Support : ${params.support}
+Intention / Objectif : ${params.intention}
+Niveau de l'auteur : ${params.level}
+
+Fournis une analyse bienveillante, constructive et experte.`;
+
+  const modelsToTry = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite"
+  ];
+
+  let response: GenerateContentResponse | null = null;
+  let lastError: any = null;
+
+  for (const model of modelsToTry) {
+    try {
+      response = await ai.models.generateContent({
+        model,
+        contents: [
+          {
+            inlineData: {
+              data: base64Data,
+              mimeType: mimeType,
+            },
+          },
+          { text: analysisPrompt },
+        ],
+        config: {
+          systemInstruction: `Tu es un professeur de dessin bienveillant, constructif et expert en analyse artistique. Réponds STRICTEMENT au format JSON avec les clés : "encouragement" (string : un paragraphe chaleureux mettant en valeur les points forts et la sensibilité de l'interprétation) et "tips" (array de strings : 2 à 3 conseils d'amélioration concrets, pratiques et adaptés au médium/support).`,
+          temperature: 0.7,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              encouragement: { type: Type.STRING },
+              tips: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+            },
+            required: ["encouragement", "tips"],
+          },
+        },
+      });
+      break;
+    } catch (err: any) {
+      console.warn(`Client model ${model} failed for analysis, trying next...`, err?.message || err);
+      lastError = err;
+    }
+  }
+
+  if (!response) {
+    throw lastError || new Error("Tous les modèles Gemini ont échoué pour l'analyse.");
+  }
+
+  const rawText = response.text?.trim() || "{}";
+  return JSON.parse(rawText);
+}
