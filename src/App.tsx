@@ -82,6 +82,7 @@ interface DrawingSubmission {
   image_url: string;
   status: "PENDING" | "APPROVED" | "REJECTED";
   rejection_reason?: string | null;
+  ai_feedback?: { encouragement: string; tips: string[] } | null;
   created_at?: any;
 }
 
@@ -137,6 +138,63 @@ export function App() {
   // Submission state
   const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
   const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [isCanvasFullscreen, setIsCanvasFullscreen] = useState<boolean>(false);
+
+  // AI Analysis state
+  const [showAiModal, setShowAiModal] = useState<boolean>(false);
+  const [aiCreationType, setAiCreationType] = useState<"numérique" | "traditionnel">("numérique");
+  const [aiMedium, setAiMedium] = useState<string>("Crayon à papier");
+  const [aiSupport, setAiSupport] = useState<string>("Papier blanc");
+  const [aiIntention, setAiIntention] = useState<string>("");
+  const [aiLevel, setAiLevel] = useState<string>("Intermédiaire");
+  const [aiAnalyzing, setAiAnalyzing] = useState<boolean>(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+
+  const handleRequestAiAnalysis = async () => {
+    const sub = userSubmissionsMap[activePrompt.id];
+    if (!sub || sub.status !== "APPROVED") return;
+
+    setAiAnalyzing(true);
+    setAiError(null);
+
+    try {
+      const res = await fetch("/api/analyze-drawing", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          image_url: sub.image_url,
+          prompt_title: activePrompt.title,
+          creation_type: aiCreationType,
+          medium: aiCreationType === "traditionnel" ? aiMedium : "Dessin numérique",
+          support: aiCreationType === "traditionnel" ? aiSupport : "Écran / Canvas numérique",
+          intention: aiIntention,
+          level: aiLevel,
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.error || "Erreur lors de l'analyse IA.");
+      }
+
+      const feedback = await res.json();
+
+      const subRef = doc(db, "drawings", sub.id);
+      await updateDoc(subRef, { ai_feedback: feedback });
+
+      setUserSubmissionsMap((prev) => ({
+        ...prev,
+        [activePrompt.id]: { ...sub, ai_feedback: feedback },
+      }));
+
+      setShowAiModal(false);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Erreur lors de l'analyse IA.";
+      setAiError(msg);
+    } finally {
+      setAiAnalyzing(false);
+    }
+  };
 
   // Gallery for active prompt
   const [galleryDrawings, setGalleryDrawings] = useState<Array<{ id: string; imageUrl: string; userId: string; submissionId: string }>>([]);
@@ -261,25 +319,45 @@ export function App() {
   const [customThemeInput, setCustomThemeInput] = useState<string>("");
   const [promptError, setPromptError] = useState<string | null>(null);
 
-  // Notification States
+  // Notification & Stats States
   const [creatorPendingMap, setCreatorPendingMap] = useState<Record<string, number>>({});
   const [participantApprovedMap, setParticipantApprovedMap] = useState<Record<string, string[]>>({});
+  const [challengeStatsMap, setChallengeStatsMap] = useState<Record<string, { totalDrawings: number; userDrawings: number; totalPrompts: number }>>({});
 
   useEffect(() => {
     if (!currentUser || challenges.length === 0) return;
-    const computeNotifications = async () => {
+    const computeNotificationsAndStats = async () => {
       try {
         const pendingMap: Record<string, number> = {};
         const approvedMap: Record<string, string[]> = {};
+        const statsMap: Record<string, { totalDrawings: number; userDrawings: number; totalPrompts: number }> = {};
 
         const viewedPending = (userProfile as any)?.viewedPendingChallenges || {};
         const viewedApproved = (userProfile as any)?.viewedApprovedSubmissions || {};
 
         const drawingsSnap = await getDocs(collection(db, "drawings"));
+        const promptsSnap = await getDocs(collection(db, "prompts"));
+
+        const promptCounts: Record<string, number> = {};
+        promptsSnap.forEach((docSnap) => {
+          const p = docSnap.data();
+          if (p.challenge_id) {
+            promptCounts[p.challenge_id] = (promptCounts[p.challenge_id] || 0) + 1;
+          }
+        });
+
+        const totalDrawingsMap: Record<string, number> = {};
+        const userDrawingsMap: Record<string, number> = {};
+
         drawingsSnap.forEach((docSnap) => {
           const d = docSnap.data() as DrawingSubmission;
           const challId = d.challenge_id;
           if (!challId) return;
+
+          totalDrawingsMap[challId] = (totalDrawingsMap[challId] || 0) + 1;
+          if (d.user_id === currentUser.uid) {
+            userDrawingsMap[challId] = (userDrawingsMap[challId] || 0) + 1;
+          }
 
           const challenge = challenges.find((c) => c.id === challId);
           if (!challenge) return;
@@ -301,14 +379,23 @@ export function App() {
           }
         });
 
+        challenges.forEach((c) => {
+          statsMap[c.id] = {
+            totalDrawings: totalDrawingsMap[c.id] || 0,
+            userDrawings: userDrawingsMap[c.id] || 0,
+            totalPrompts: promptCounts[c.id] || 6,
+          };
+        });
+
         setCreatorPendingMap(pendingMap);
         setParticipantApprovedMap(approvedMap);
+        setChallengeStatsMap(statsMap);
       } catch (err) {
-        console.error("Error computing notifications:", err);
+        console.error("Error computing notifications and stats:", err);
       }
     };
 
-    computeNotifications();
+    computeNotificationsAndStats();
   }, [currentUser, challenges, userProfile]);
 
   const markPendingViewed = async (challengeId: string) => {
@@ -353,6 +440,108 @@ export function App() {
   }, [activeChallenge, currentUser]);
 
 
+
+  const renderCanvasToolsAndCanvas = (isFullscreen = false) => (
+    <div className={`space-y-3 ${isFullscreen ? "max-w-4xl w-full mx-auto flex-1 flex flex-col justify-center" : ""}`}>
+      <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 bg-stone-50 border border-stone-200 rounded-lg">
+        <div className="flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => setTool("pen")}
+            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+              tool === "pen" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
+            }`}
+          >
+            Fusain
+          </button>
+          <button
+            type="button"
+            onClick={() => setTool("watercolor")}
+            className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+              tool === "watercolor" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
+            }`}
+          >
+            Aquarelle
+          </button>
+          <button
+            type="button"
+            onClick={() => setTool("eraser")}
+            className={`inline-flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
+              tool === "eraser" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
+            }`}
+          >
+            <Eraser className="w-3 h-3" />
+            Gomme
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2">
+          {PALETTE.map((p) => (
+            <button
+              key={p.hex}
+              type="button"
+              title={p.name}
+              onClick={() => {
+                setColor(p.hex);
+                if (tool === "eraser") setTool("pen");
+              }}
+              className={`w-5 h-5 rounded-full transition-transform ${
+                color === p.hex && tool !== "eraser" ? "scale-115 ring-2 ring-stone-900" : "hover:scale-105"
+              }`}
+              style={{ backgroundColor: p.hex }}
+            />
+          ))}
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-1 text-xs text-stone-600">
+            <span>Taille</span>
+            <input
+              type="range"
+              min={2}
+              max={16}
+              value={brushSize}
+              onChange={(e) => setBrushSize(Number(e.target.value))}
+              className="w-14 accent-stone-900"
+            />
+          </label>
+          <button type="button" onClick={() => {}} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Annuler">
+            <RotateCcw className="w-3.5 h-3.5" />
+          </button>
+          <button type="button" onClick={handleClearCanvas} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Effacer">
+            <Trash2 className="w-3.5 h-3.5" />
+          </button>
+          {!isFullscreen && (
+            <button
+              type="button"
+              onClick={() => setIsCanvasFullscreen(true)}
+              className="inline-flex items-center gap-1 px-2.5 py-1 text-xs font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 rounded-md transition-colors cursor-pointer shadow-xs"
+              title="Plein écran"
+            >
+              <Maximize2 className="w-3.5 h-3.5" />
+              Plein écran
+            </button>
+          )}
+        </div>
+      </div>
+
+      <div className={`rounded-lg border border-stone-300 overflow-hidden bg-[#FAF8F5] ${isFullscreen ? "flex-1 flex items-center justify-center shadow-lg" : ""}`}>
+        <canvas
+          ref={canvasRef}
+          width={isFullscreen ? 800 : 640}
+          height={isFullscreen ? 600 : 380}
+          onMouseDown={startDraw}
+          onMouseMove={draw}
+          onMouseUp={endDraw}
+          onMouseLeave={endDraw}
+          onTouchStart={startDraw}
+          onTouchMove={draw}
+          onTouchEnd={endDraw}
+          className={`w-full ${isFullscreen ? "h-[70vh] sm:h-[78vh]" : "aspect-[16/10]"} cursor-crosshair touch-none block object-contain`}
+        />
+      </div>
+    </div>
+  );
 
   const generateUniqueCode = () => {
     const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
@@ -1311,6 +1500,18 @@ export function App() {
                       </p>
                     </div>
 
+                    {/* Stats Summary */}
+                    <div className="grid grid-cols-2 gap-2 p-2 bg-stone-50 border border-stone-200 rounded-xl text-center text-[11px] font-mono">
+                      <div>
+                        <span className="block text-stone-500 text-[9px] uppercase">Total postés</span>
+                        <span className="font-bold text-stone-900">{challengeStatsMap[c.id]?.totalDrawings || 0}</span>
+                      </div>
+                      <div>
+                        <span className="block text-emerald-700 text-[9px] uppercase">Dessins / Total</span>
+                        <span className="font-bold text-emerald-900">{challengeStatsMap[c.id]?.userDrawings || 0}/{challengeStatsMap[c.id]?.totalPrompts || 6}</span>
+                      </div>
+                    </div>
+
                     <div className="pt-3 border-t border-stone-100 flex items-center justify-between text-xs">
                       <div className="flex items-center gap-2">
                         <button
@@ -1377,6 +1578,18 @@ export function App() {
                       </p>
                     </div>
 
+                    {/* Stats Summary */}
+                    <div className="grid grid-cols-2 gap-2 p-2 bg-stone-50 border border-stone-200 rounded-xl text-center text-[11px] font-mono">
+                      <div>
+                        <span className="block text-stone-500 text-[9px] uppercase">Total postés</span>
+                        <span className="font-bold text-stone-900">{challengeStatsMap[c.id]?.totalDrawings || 0}</span>
+                      </div>
+                      <div>
+                        <span className="block text-emerald-700 text-[9px] uppercase">Dessins / Total</span>
+                        <span className="font-bold text-emerald-900">{challengeStatsMap[c.id]?.userDrawings || 0}/{challengeStatsMap[c.id]?.totalPrompts || 6}</span>
+                      </div>
+                    </div>
+
                     <div className="pt-3 border-t border-stone-100 flex items-center justify-between text-xs font-semibold text-emerald-800">
                       <span>Ouvrir l'atelier</span>
                       <span>→</span>
@@ -1416,6 +1629,18 @@ export function App() {
                       <p className="text-xs text-stone-600 line-clamp-2 leading-relaxed">
                         {c.description || "Aucune description."}
                       </p>
+                    </div>
+
+                    {/* Stats Summary */}
+                    <div className="grid grid-cols-2 gap-2 p-2 bg-stone-50 border border-stone-200 rounded-xl text-center text-[11px] font-mono">
+                      <div>
+                        <span className="block text-stone-500 text-[9px] uppercase">Total postés</span>
+                        <span className="font-bold text-stone-900">{challengeStatsMap[c.id]?.totalDrawings || 0}</span>
+                      </div>
+                      <div>
+                        <span className="block text-emerald-700 text-[9px] uppercase">Dessins / Total</span>
+                        <span className="font-bold text-emerald-900">{challengeStatsMap[c.id]?.userDrawings || 0}/{challengeStatsMap[c.id]?.totalPrompts || 6}</span>
+                      </div>
                     </div>
 
                     <div className="pt-3 border-t border-stone-100 flex items-center justify-between text-xs font-semibold text-stone-800 group-hover:text-amber-900">
@@ -2063,10 +2288,54 @@ export function App() {
                       </div>
                     )}
 
-                    {/* Workspace based on submissionMode */}
+                    {/* Workspace or Approved & AI Analysis View */}
                     {!isPending && (
                       <div className="bg-white border border-stone-200 rounded-xl p-5 space-y-4 shadow-xs">
-                        {submissionMode === "upload" ? (
+                        {isApproved ? (
+                          <div className="space-y-6">
+                            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-stone-100">
+                              <div className="flex items-center gap-3">
+                                <CheckCircle2 className="w-6 h-6 text-emerald-700 shrink-0" />
+                                <div>
+                                  <h3 className="text-sm font-bold text-emerald-900">Dessin validé avec succès !</h3>
+                                  <p className="text-xs text-stone-500">Votre dessin est validé et présent dans la galerie. Vous pouvez demander une analyse et des conseils personnalisés par IA (Gemini Vision).</p>
+                                </div>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => setShowAiModal(true)}
+                                className="inline-flex items-center gap-2 px-4 py-2 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer shadow-sm transition-all"
+                              >
+                                <Sparkles className="w-4 h-4 text-amber-200" />
+                                {currentSub?.ai_feedback ? "Voir l'analyse IA" : "Demander une analyse IA"}
+                              </button>
+                            </div>
+
+                            <div className="rounded-xl border border-stone-200 overflow-hidden bg-[#FAF8F5] max-w-lg mx-auto aspect-[16/10] flex items-center justify-center p-2">
+                              <img src={currentSub.image_url} alt="Votre dessin validé" className="max-h-full max-w-full object-contain rounded" />
+                            </div>
+
+                            {currentSub?.ai_feedback && (
+                              <div className="p-5 bg-amber-50/60 border border-amber-200 rounded-xl space-y-3">
+                                <div className="flex items-center gap-2 text-amber-900 font-bold text-xs uppercase tracking-wide">
+                                  <Sparkles className="w-4 h-4 text-amber-700" />
+                                  Analyse et conseils personnalisés (IA Gemini)
+                                </div>
+                                <p className="text-xs text-stone-700 leading-relaxed italic bg-white p-3 rounded-lg border border-amber-100 shadow-xs">
+                                  "{currentSub.ai_feedback.encouragement}"
+                                </p>
+                                <div className="space-y-1.5 pt-1">
+                                  <span className="text-[11px] font-bold text-stone-900 block">Pistes d'amélioration concrètes :</span>
+                                  <ul className="list-disc list-inside text-xs text-stone-700 space-y-1">
+                                    {currentSub.ai_feedback.tips.map((tip, idx) => (
+                                      <li key={idx} className="leading-relaxed">{tip}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        ) : submissionMode === "upload" ? (
                           <div className="space-y-3">
                             {importedImageUrl ? (
                               <div className="space-y-3">
@@ -2102,94 +2371,7 @@ export function App() {
                             )}
                           </div>
                         ) : submissionMode === "canvas" ? (
-                          <>
-                            <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 bg-stone-50 border border-stone-200 rounded-lg">
-                              <div className="flex items-center gap-1">
-                                <button
-                                  type="button"
-                                  onClick={() => setTool("pen")}
-                                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                                    tool === "pen" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
-                                  }`}
-                                >
-                                  Fusain
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setTool("watercolor")}
-                                  className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                                    tool === "watercolor" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
-                                  }`}
-                                >
-                                  Aquarelle
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => setTool("eraser")}
-                                  className={`inline-flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                                    tool === "eraser" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
-                                  }`}
-                                >
-                                  <Eraser className="w-3 h-3" />
-                                  Gomme
-                                </button>
-                              </div>
-
-                              <div className="flex items-center gap-2">
-                                {PALETTE.map((p) => (
-                                  <button
-                                    key={p.hex}
-                                    type="button"
-                                    title={p.name}
-                                    onClick={() => {
-                                      setColor(p.hex);
-                                      if (tool === "eraser") setTool("pen");
-                                    }}
-                                    className={`w-5 h-5 rounded-full transition-transform ${
-                                      color === p.hex && tool !== "eraser" ? "scale-115 ring-2 ring-stone-900" : "hover:scale-105"
-                                    }`}
-                                    style={{ backgroundColor: p.hex }}
-                                  />
-                                ))}
-                              </div>
-
-                              <div className="flex items-center gap-2">
-                                <label className="flex items-center gap-1 text-xs text-stone-600">
-                                  <span>Taille</span>
-                                  <input
-                                    type="range"
-                                    min={2}
-                                    max={14}
-                                    value={brushSize}
-                                    onChange={(e) => setBrushSize(Number(e.target.value))}
-                                    className="w-14 accent-stone-900"
-                                  />
-                                </label>
-                                <button type="button" onClick={() => {}} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Annuler">
-                                  <RotateCcw className="w-3.5 h-3.5" />
-                                </button>
-                                <button type="button" onClick={handleClearCanvas} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Effacer">
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </div>
-
-                            <div className="rounded-lg border border-stone-300 overflow-hidden bg-[#FAF8F5]">
-                              <canvas
-                                ref={canvasRef}
-                                width={640}
-                                height={380}
-                                onMouseDown={startDraw}
-                                onMouseMove={draw}
-                                onMouseUp={endDraw}
-                                onMouseLeave={endDraw}
-                                onTouchStart={startDraw}
-                               onTouchMove={draw}
-                                onTouchEnd={endDraw}
-                                className="w-full aspect-[16/10] cursor-crosshair touch-none block"
-                              />
-                            </div>
-                          </>
+                          renderCanvasToolsAndCanvas(false)
                         ) : (
                           /* Both canvas and upload */
                           <>
@@ -2210,96 +2392,47 @@ export function App() {
                                 </div>
                               </div>
                             ) : (
-                              <>
-                                <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 bg-stone-50 border border-stone-200 rounded-lg">
-                                  <div className="flex items-center gap-1">
-                                    <button
-                                      type="button"
-                                      onClick={() => setTool("pen")}
-                                      className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                                        tool === "pen" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
-                                      }`}
-                                    >
-                                      Fusain
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => setTool("watercolor")}
-                                      className={`px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                                        tool === "watercolor" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
-                                      }`}
-                                    >
-                                      Aquarelle
-                                    </button>
-                                    <button
-                                      type="button"
-                                      onClick={() => setTool("eraser")}
-                                      className={`inline-flex items-center gap-1 px-3 py-1 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                                        tool === "eraser" ? "bg-stone-900 text-white" : "text-stone-700 hover:bg-stone-200"
-                                      }`}
-                                    >
-                                      <Eraser className="w-3 h-3" />
-                                      Gomme
-                                    </button>
-                                  </div>
-
-                                  <div className="flex items-center gap-2">
-                                    {PALETTE.map((p) => (
-                                      <button
-                                        key={p.hex}
-                                        type="button"
-                                        title={p.name}
-                                        onClick={() => {
-                                          setColor(p.hex);
-                                          if (tool === "eraser") setTool("pen");
-                                        }}
-                                        className={`w-5 h-5 rounded-full transition-transform ${
-                                          color === p.hex && tool !== "eraser" ? "scale-115 ring-2 ring-stone-900" : "hover:scale-105"
-                                        }`}
-                                        style={{ backgroundColor: p.hex }}
-                                      />
-                                    ))}
-                                  </div>
-
-                                  <div className="flex items-center gap-2">
-                                    <label className="flex items-center gap-1 text-xs text-stone-600">
-                                      <span>Taille</span>
-                                      <input
-                                        type="range"
-                                        min={2}
-                                        max={14}
-                                        value={brushSize}
-                                        onChange={(e) => setBrushSize(Number(e.target.value))}
-                                        className="w-14 accent-stone-900"
-                                      />
-                                    </label>
-                                    <button type="button" onClick={() => {}} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Annuler">
-                                      <RotateCcw className="w-3.5 h-3.5" />
-                                    </button>
-                                    <button type="button" onClick={handleClearCanvas} className="p-1.5 text-stone-700 hover:bg-stone-200 rounded cursor-pointer" title="Effacer">
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                    </button>
-                                  </div>
-                                </div>
-
-                                <div className="rounded-lg border border-stone-300 overflow-hidden bg-[#FAF8F5]">
-                                  <canvas
-                                    ref={canvasRef}
-                                    width={640}
-                                    height={380}
-                                    onMouseDown={startDraw}
-                                    onMouseMove={draw}
-                                    onMouseUp={endDraw}
-                                    onMouseLeave={endDraw}
-                                    onTouchStart={startDraw}
-                                    onTouchMove={draw}
-                                    onTouchEnd={endDraw}
-                                    className="w-full aspect-[16/10] cursor-crosshair touch-none block"
-                                  />
-                                </div>
-                              </>
+                              renderCanvasToolsAndCanvas(false)
                             )}
                           </>
+                        )}
+
+                        {/* Fullscreen Canvas Modal */}
+                        {isCanvasFullscreen && (
+                          <div className="fixed inset-0 z-50 bg-[#FAF8F5] flex flex-col p-4 sm:p-8 overflow-y-auto">
+                            <div className="flex items-center justify-between pb-4 border-b border-stone-200 mb-4">
+                              <div>
+                                <span className="text-xs font-semibold text-amber-800 uppercase tracking-wide">Mode Dessin Plein Écran</span>
+                                <h2 className="text-lg font-bold text-stone-900">« {activePrompt.title} »</h2>
+                              </div>
+                              <div className="flex items-center gap-3">
+                                <button
+                                  type="button"
+                                  disabled={isSubmitting}
+                                  onClick={async () => {
+                                    await handleManualSubmit();
+                                    setIsCanvasFullscreen(false);
+                                  }}
+                                  className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-900 rounded-xl cursor-pointer shadow-md"
+                                >
+                                  <ShieldCheck className="w-4 h-4" />
+                                  Soumettre le dessin
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setIsCanvasFullscreen(false)}
+                                  className="p-2 text-stone-600 bg-stone-200 hover:bg-stone-300 rounded-xl cursor-pointer"
+                                  title="Quitter le plein écran"
+                                >
+                                  <X className="w-5 h-5" />
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="flex-1 flex flex-col justify-center">
+                              {renderCanvasToolsAndCanvas(true)}
+                            </div>
+                          </div>
                         )}
 
                         {submissionError && (
@@ -2518,6 +2651,123 @@ export function App() {
               >
                 Annuler
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* AI Analysis Modal */}
+      {showAiModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-stone-200 rounded-2xl max-w-lg w-full p-6 space-y-6 shadow-xl overflow-y-auto max-h-[90vh]">
+            <div className="flex items-center justify-between pb-3 border-b border-stone-100">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-5 h-5 text-amber-800" />
+                <h3 className="text-base font-bold text-stone-900">Analyse et Conseils par IA (Gemini Vision)</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowAiModal(false)}
+                className="p-1 text-stone-500 hover:text-stone-900 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              <div>
+                <label className="block font-medium text-stone-700 mb-1">Type de création</label>
+                <select
+                  value={aiCreationType}
+                  onChange={(e) => setAiCreationType(e.target.value as any)}
+                  className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                >
+                  <option value="numérique">Dessin numérique (réalisé sur le canvas)</option>
+                  <option value="traditionnel">Dessin traditionnel (image importée)</option>
+                </select>
+              </div>
+
+              {aiCreationType === "traditionnel" && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label className="block font-medium text-stone-700 mb-1">Médium utilisé</label>
+                    <select
+                      value={aiMedium}
+                      onChange={(e) => setAiMedium(e.target.value)}
+                      className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                    >
+                      <option value="Crayon à papier">Crayon à papier</option>
+                      <option value="Stylo bille/Ancre">Stylo bille / Encre</option>
+                      <option value="Feutre">Feutre</option>
+                      <option value="Peinture">Peinture</option>
+                      <option value="Fusain">Fusain</option>
+                      <option value="Autre">Autre</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block font-medium text-stone-700 mb-1">Support</label>
+                    <select
+                      value={aiSupport}
+                      onChange={(e) => setAiSupport(e.target.value)}
+                      className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                    >
+                      <option value="Papier blanc">Papier blanc</option>
+                      <option value="Papier grain/croquis">Papier grain / croquis</option>
+                      <option value="Papier quadrillé/ligné">Papier quadrillé / ligné</option>
+                      <option value="Autre">Autre</option>
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <label className="block font-medium text-stone-700 mb-1">Intention / Objectif (optionnel)</label>
+                <input
+                  type="text"
+                  value={aiIntention}
+                  onChange={(e) => setAiIntention(e.target.value)}
+                  placeholder="Ex: Travailler les volumes, croquis rapide, les détails..."
+                  className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium text-stone-700 mb-1">Niveau (optionnel)</label>
+                <select
+                  value={aiLevel}
+                  onChange={(e) => setAiLevel(e.target.value)}
+                  className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                >
+                  <option value="Débutant">Débutant</option>
+                  <option value="Intermédiaire">Intermédiaire</option>
+                  <option value="Avancé">Avancé</option>
+                </select>
+              </div>
+
+              {aiError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-red-800 text-xs">
+                  {aiError}
+                </div>
+              )}
+
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={aiAnalyzing}
+                  onClick={handleRequestAiAnalysis}
+                  className="flex-1 py-2.5 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  <Sparkles className="w-4 h-4 text-amber-200" />
+                  {aiAnalyzing ? "Analyse Gemini Vision en cours..." : "Lancer l'analyse IA"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAiModal(false)}
+                  className="px-4 py-2.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded-xl cursor-pointer"
+                >
+                  Annuler
+                </button>
+              </div>
             </div>
           </div>
         </div>

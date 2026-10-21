@@ -31,29 +31,50 @@ export async function generatePromptsClientSide(
     userPrompt += ` Thème d'inspiration : "${theme}".`;
   }
 
-  // Cost optimization: using Flash model with thinkingBudget: 0
-  const response: GenerateContentResponse = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
-    contents: userPrompt,
-    config: {
-      systemInstruction: ART_DIRECTOR_SYSTEM_INSTRUCTION,
-      temperature: 0.7,
-      thinkingConfig: { thinkingBudget: 0 },
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            title: { type: Type.STRING },
-            category: { type: Type.STRING, enum: ["imagination", "observation", "technique", "poetique"] },
-            difficulty: { type: Type.STRING, enum: ["facile", "moyen"] },
+  const modelsToTry = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite"
+  ];
+
+  let response: GenerateContentResponse | null = null;
+  let lastError: any = null;
+
+  for (const model of modelsToTry) {
+    try {
+      response = await ai.models.generateContent({
+        model,
+        contents: userPrompt,
+        config: {
+          systemInstruction: ART_DIRECTOR_SYSTEM_INSTRUCTION,
+          temperature: 0.7,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                title: { type: Type.STRING },
+                category: { type: Type.STRING, enum: ["imagination", "observation", "technique", "poetique"] },
+                difficulty: { type: Type.STRING, enum: ["facile", "moyen"] },
+              },
+              required: ["title", "category", "difficulty"],
+            },
           },
-          required: ["title", "category", "difficulty"],
         },
-      },
-    },
-  });
+      });
+      break;
+    } catch (err: any) {
+      console.warn(`Client model ${model} failed, trying next...`, err?.message || err);
+      lastError = err;
+    }
+  }
+
+  if (!response) {
+    throw lastError || new Error("Tous les modèles Gemini ont échoué.");
+  }
 
   const rawText = response.text?.trim() || "[]";
   const parsedPrompts: DrawingPrompt[] = JSON.parse(rawText);
