@@ -201,3 +201,198 @@ Fournis une analyse bienveillante, constructive et experte.`;
   const rawText = response.text?.trim() || "{}";
   return JSON.parse(rawText);
 }
+
+export async function analyzePathAttemptClientSide(
+  apiKey: string,
+  params: {
+    drawing_url: string;
+    reference_image_url?: string | null;
+    path_objective: string;
+    step_title: string;
+    step_description: string;
+    creation_type: string;
+    medium: string;
+    support: string;
+    intention: string;
+    level: string;
+    previous_attempts_count: number;
+    previous_feedback?: string;
+  }
+): Promise<{ encouragement: string; tips: string[]; progress_comparison: string }> {
+  if (!apiKey) {
+    throw new Error("Clé API Gemini requise pour l'analyse.");
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  let base64Drawing = params.drawing_url;
+  let mimeType = "image/webp";
+  if (params.drawing_url.startsWith("data:")) {
+    const matches = params.drawing_url.match(/^data:(.+?);base64,(.+)$/);
+    if (matches) {
+      mimeType = matches[1];
+      base64Drawing = matches[2];
+    }
+  }
+
+  const contents: any[] = [];
+  contents.push({
+    inlineData: {
+      data: base64Drawing,
+      mimeType: mimeType,
+    },
+  });
+
+  if (params.reference_image_url) {
+    let base64Ref = params.reference_image_url;
+    let refMime = "image/webp";
+    if (params.reference_image_url.startsWith("data:")) {
+      const matches = params.reference_image_url.match(/^data:(.+?);base64,(.+)$/);
+      if (matches) {
+        refMime = matches[1];
+        base64Ref = matches[2];
+      }
+    }
+    contents.push({
+      inlineData: {
+        data: base64Ref,
+        mimeType: refMime,
+      },
+    });
+  }
+
+  const promptText = `Analyse ce dessin dans le cadre d'un parcours d'auto-perfectionnement (challenge solo).
+Objectif global du parcours : "${params.path_objective}"
+Titre de l'étape actuelle : "${params.step_title}"
+Consignes détaillées / Texte explicatif de l'étape : "${params.step_description}"
+Type de création : ${params.creation_type}
+Médium : ${params.medium}, Support : ${params.support}
+Intention de l'auteur : ${params.intention}
+Niveau : ${params.level}
+Nombre d'essais précédents sur cette étape : ${params.previous_attempts_count}
+${params.previous_feedback ? `Retour sur le dernier essai : "${params.previous_feedback}"` : ''}
+
+Fournis une analyse bienveillante, constructive, experte et axée sur l'objectif global et l'étape.`;
+
+  contents.push({ text: promptText });
+
+  const modelsToTry = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite"
+  ];
+
+  let response: GenerateContentResponse | null = null;
+  let lastError: any = null;
+
+  for (const model of modelsToTry) {
+    try {
+      response = await ai.models.generateContent({
+        model,
+        contents,
+        config: {
+          systemInstruction: `Tu es un professeur de dessin bienveillant, constructif et expert en coaching artistique personnel. Réponds STRICTEMENT au format JSON avec les clés :
+- "encouragement" (string : un paragraphe chaleureux évaluant l'atteinte de l'objectif de l'étape)
+- "tips" (array de strings : 2 à 3 conseils techniques précis et adaptés au médium/support)
+- "progress_comparison" (string : une analyse comparative avec les essais précédents ou les marges de progression identifiées)`,
+          temperature: 0.7,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              encouragement: { type: Type.STRING },
+              tips: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+              progress_comparison: { type: Type.STRING },
+            },
+            required: ["encouragement", "tips", "progress_comparison"],
+          },
+        },
+      });
+      break;
+    } catch (err: any) {
+      console.warn(`Client model ${model} failed for path analysis, trying next...`, err?.message || err);
+      lastError = err;
+    }
+  }
+
+  if (!response) {
+    throw lastError || new Error("Tous les modèles Gemini ont échoué pour l'analyse du parcours.");
+  }
+
+  const rawText = response.text?.trim() || "{}";
+  return JSON.parse(rawText);
+}
+
+export async function generatePersonalPathClientSide(
+  apiKey: string,
+  topicOrGoal: string
+): Promise<{ objective: string; steps: Array<{ title: string; description: string }> }> {
+  if (!apiKey) {
+    throw new Error("Clé API Gemini requise.");
+  }
+
+  const ai = new GoogleGenAI({ apiKey });
+  const prompt = `Crée un parcours d'apprentissage de dessin personnalisé et progressif basé sur l'objectif : "${topicOrGoal}".
+Fournis un objet JSON avec :
+- "objective" (string : reformulation inspirante de l'objectif global)
+- "steps" (array de 5 à 6 étapes ordonnées, chacune contenant "title" (string) et "description" (string : consignes pédagogiques détaillées et explicatives)).`;
+
+  const modelsToTry = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash",
+    "gemini-flash-latest",
+    "gemini-3.1-flash-lite",
+    "gemini-2.5-flash-lite"
+  ];
+
+  let response: GenerateContentResponse | null = null;
+  let lastError: any = null;
+
+  for (const model of modelsToTry) {
+    try {
+      response = await ai.models.generateContent({
+        model,
+        contents: prompt,
+        config: {
+          systemInstruction: `Tu es un professeur de dessin expert et pédagogue. Réponds STRICTEMENT au format JSON demandé.`,
+          temperature: 0.7,
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              objective: { type: Type.STRING },
+              steps: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    title: { type: Type.STRING },
+                    description: { type: Type.STRING },
+                  },
+                  required: ["title", "description"],
+                },
+              },
+            },
+            required: ["objective", "steps"],
+          },
+        },
+      });
+      break;
+    } catch (err: any) {
+      console.warn(`Client model ${model} failed for path generation...`, err?.message || err);
+      lastError = err;
+    }
+  }
+
+  if (!response) {
+    throw lastError || new Error("Échec de la génération du parcours.");
+  }
+
+  const rawText = response.text?.trim() || "{}";
+  return JSON.parse(rawText);
+}

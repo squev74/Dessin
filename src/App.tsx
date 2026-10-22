@@ -56,7 +56,12 @@ import {
   INITIAL_CURATED_PROMPTS,
   THEME_PRESETS,
 } from "./utils/curatedPrompts";
-import { generatePromptsClientSide, analyzeDrawingClientSide } from "./utils/geminiClient";
+import {
+  generatePromptsClientSide,
+  analyzeDrawingClientSide,
+  analyzePathAttemptClientSide,
+  generatePersonalPathClientSide,
+} from "./utils/geminiClient";
 
 interface Challenge {
   id: string;
@@ -83,6 +88,42 @@ interface DrawingSubmission {
   status: "PENDING" | "APPROVED" | "REJECTED";
   rejection_reason?: string | null;
   ai_feedback?: { encouragement: string; tips: string[] } | null;
+  created_at?: any;
+}
+
+interface PersonalPath {
+  id: string;
+  title: string;
+  objective: string;
+  creator_id: string;
+  created_at?: any;
+}
+
+interface PersonalStep {
+  id: string;
+  path_id: string;
+  orderIndex: number;
+  title: string;
+  description: string;
+  reference_image_url?: string | null;
+}
+
+interface PersonalAttempt {
+  id: string;
+  path_id: string;
+  step_id: string;
+  user_id: string;
+  image_url: string;
+  medium: string;
+  support: string;
+  intention: string;
+  level: string;
+  ai_feedback?: {
+    encouragement: string;
+    tips: string[];
+    progress_comparison: string;
+  } | null;
+  is_validated?: boolean;
   created_at?: any;
 }
 
@@ -113,6 +154,8 @@ export function App() {
   const [newChallengeCode, setNewChallengeCode] = useState<string>("");
   const [newChallengeMaxParticipants, setNewChallengeMaxParticipants] = useState<number>(50);
   const [newChallengeSubmissionMode, setNewChallengeSubmissionMode] = useState<"canvas" | "upload" | "both">("both");
+  const [editingChallengeTitle, setEditingChallengeTitle] = useState<boolean>(false);
+  const [challengeTitleInput, setChallengeTitleInput] = useState<string>("");
 
   // Join Private Challenge State
   const [joinCodeInput, setJoinCodeInput] = useState<string>("");
@@ -149,6 +192,459 @@ export function App() {
   const [aiLevel, setAiLevel] = useState<string>("Intermédiaire");
   const [aiAnalyzing, setAiAnalyzing] = useState<boolean>(false);
   const [aiError, setAiError] = useState<string | null>(null);
+
+  // Personal Paths (Challenge Solo / Auto-perfectionnement) State
+  const [personalPaths, setPersonalPaths] = useState<PersonalPath[]>([]);
+  const [activePersonalPath, setActivePersonalPath] = useState<PersonalPath | null>(null);
+  const [personalSteps, setPersonalSteps] = useState<PersonalStep[]>([]);
+  const [activePersonalStepIndex, setActivePersonalStepIndex] = useState<number>(0);
+  const [personalAttemptsMap, setPersonalAttemptsMap] = useState<Record<string, PersonalAttempt[]>>({});
+  const [showCreatePathModal, setShowCreatePathModal] = useState<boolean>(false);
+  const [pathGoalInput, setPathGoalInput] = useState<string>("");
+  const [pathTitleInput, setPathTitleInput] = useState<string>("");
+  const [isGeneratingPath, setIsGeneratingPath] = useState<boolean>(false);
+  const [pathError, setPathError] = useState<string | null>(null);
+  const [isAnalyzingPathAttempt, setIsAnalyzingPathAttempt] = useState<boolean>(false);
+  const [pathAttemptError, setPathAttemptError] = useState<string | null>(null);
+  const [pathMediumInput, setPathMediumInput] = useState<string>("Crayon à papier");
+  const [pathSupportInput, setPathSupportInput] = useState<string>("Papier blanc");
+  const [pathIntentionInput, setPathIntentionInput] = useState<string>("");
+  const [pathLevelInput, setPathLevelInput] = useState<string>("Intermédiaire");
+  const [pathCreationType, setPathCreationType] = useState<"numérique" | "traditionnel">("numérique");
+  const [pathRefImageInput, setPathRefImageInput] = useState<string | null>(null);
+  const [editingPersonalPath, setEditingPersonalPath] = useState<boolean>(false);
+  const [editPathTitleInput, setEditPathTitleInput] = useState<string>("");
+  const [editPathObjectiveInput, setEditPathObjectiveInput] = useState<string>("");
+
+  const loadPersonalPaths = async () => {
+    if (!currentUser) return;
+    try {
+      const q = query(collection(db, "personal_paths"), where("creator_id", "==", currentUser.uid));
+      const snap = await getDocs(q);
+      let loaded: PersonalPath[] = [];
+      snap.forEach((d) => {
+        loaded.push({ id: d.id, ...(d.data() as any) });
+      });
+      setPersonalPaths(loaded);
+    } catch (err) {
+      console.error("Error loading personal paths:", err);
+    }
+  };
+
+  const loadPersonalPathData = async (pathId: string, uid: string) => {
+    try {
+      const sQuery = query(collection(db, "personal_steps"), where("path_id", "==", pathId));
+      const sSnap = await getDocs(sQuery);
+      let steps: PersonalStep[] = [];
+      sSnap.forEach((d) => {
+        steps.push({ id: d.id, ...(d.data() as any) });
+      });
+      steps.sort((a, b) => a.orderIndex - b.orderIndex);
+      setPersonalSteps(steps);
+
+      const aQuery = query(collection(db, "personal_attempts"), where("path_id", "==", pathId), where("user_id", "==", uid));
+      const aSnap = await getDocs(aQuery);
+      let attemptsMap: Record<string, PersonalAttempt[]> = {};
+      aSnap.forEach((d) => {
+        const att = { id: d.id, ...(d.data() as any) } as PersonalAttempt;
+        if (!attemptsMap[att.step_id]) {
+          attemptsMap[att.step_id] = [];
+        }
+        attemptsMap[att.step_id].push(att);
+      });
+      Object.keys(attemptsMap).forEach((stepId) => {
+        attemptsMap[stepId].sort((a, b) => {
+          const tA = a.created_at?.toMillis ? a.created_at.toMillis() : 0;
+          const tB = b.created_at?.toMillis ? b.created_at.toMillis() : 0;
+          return tB - tA;
+        });
+      });
+      setPersonalAttemptsMap(attemptsMap);
+
+      let firstUnvalidatedIdx = 0;
+      for (let i = 0; i < steps.length; i++) {
+        const stepAttempts = attemptsMap[steps[i].id] || [];
+        const hasValidated = stepAttempts.some((att) => att.is_validated);
+        if (!hasValidated) {
+          firstUnvalidatedIdx = i;
+          break;
+        }
+        if (i === steps.length - 1) {
+          firstUnvalidatedIdx = i;
+        }
+      }
+      setActivePersonalStepIndex(firstUnvalidatedIdx);
+    } catch (err) {
+      console.error("Error loading personal path data:", err);
+    }
+  };
+
+  useEffect(() => {
+    if (activePersonalPath && currentUser) {
+      loadPersonalPathData(activePersonalPath.id, currentUser.uid);
+    }
+  }, [activePersonalPath, currentUser]);
+
+  const [editingStep, setEditingStep] = useState<PersonalStep | null>(null);
+  const [editStepTitle, setEditStepTitle] = useState<string>("");
+  const [editStepDesc, setEditStepDesc] = useState<string>("");
+
+  const handleSavePersonalStep = async () => {
+    if (!editingStep || !activePersonalPath) return;
+    try {
+      const updatedStep = {
+        ...editingStep,
+        title: editStepTitle.trim() || editingStep.title,
+        description: editStepDesc.trim() || editingStep.description,
+      };
+      await setDoc(doc(db, "personal_steps", updatedStep.id), updatedStep);
+      setPersonalSteps((prev) => prev.map((s) => s.id === updatedStep.id ? updatedStep : s));
+      setEditingStep(null);
+      setEditStepTitle("");
+      setEditStepDesc("");
+    } catch (err) {
+      console.error("Error saving step:", err);
+    }
+  };
+
+  const handleAddPersonalStep = async () => {
+    if (!activePersonalPath) return;
+    const stepId = `step-${activePersonalPath.id}-${Date.now()}`;
+    const newStep: PersonalStep = {
+      id: stepId,
+      path_id: activePersonalPath.id,
+      orderIndex: personalSteps.length + 1,
+      title: "Nouvelle étape d'entraînement",
+      description: "Décrivez ici les consignes détaillées et l'exercice à réaliser.",
+      reference_image_url: null,
+    };
+    try {
+      await setDoc(doc(db, "personal_steps", stepId), newStep);
+      setPersonalSteps((prev) => [...prev, newStep]);
+    } catch (err) {
+      console.error("Error adding step:", err);
+    }
+  };
+
+  const handleDeletePersonalStep = async (stepId: string) => {
+    if (personalSteps.length <= 1) {
+      alert("Un parcours doit contenir au moins une étape.");
+      return;
+    }
+    try {
+      await deleteDoc(doc(db, "personal_steps", stepId));
+      setPersonalSteps((prev) => prev.filter((s) => s.id !== stepId));
+      if (activePersonalStepIndex >= personalSteps.length - 1) {
+        setActivePersonalStepIndex(Math.max(0, personalSteps.length - 2));
+      }
+    } catch (err) {
+      console.error("Error deleting step:", err);
+      alert("Erreur lors de la suppression de l'étape.");
+    }
+  };
+
+  const handleUploadStepReference = async (stepId: string, e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = async (event) => {
+      const img = new Image();
+      img.onload = async () => {
+        const canvas = document.createElement("canvas");
+        const MAX_WIDTH = 600;
+        const MAX_HEIGHT = 450;
+        let width = img.width;
+        let height = img.height;
+        if (width > height) {
+          if (width > MAX_WIDTH) {
+            height *= MAX_WIDTH / width;
+            width = MAX_WIDTH;
+          }
+        } else {
+          if (height > MAX_HEIGHT) {
+            width *= MAX_HEIGHT / height;
+            height = MAX_HEIGHT;
+          }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (ctx) {
+          ctx.drawImage(img, 0, 0, width, height);
+          const compressedDataUrl = canvas.toDataURL("image/webp", 0.75);
+          
+          try {
+            await updateDoc(doc(db, "personal_steps", stepId), { reference_image_url: compressedDataUrl });
+            setPersonalSteps((prev) => prev.map((s) => s.id === stepId ? { ...s, reference_image_url: compressedDataUrl } : s));
+          } catch (err) {
+            console.error("Error updating reference image:", err);
+          }
+        }
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const handleQuickCreatePersonalPath = async () => {
+    if (!currentUser) return;
+    const pathId = `path-${Date.now()}`;
+    const defaultGoal = "Maîtriser les fondamentaux du dessin, les proportions et l'observation";
+    const newPath: PersonalPath = {
+      id: pathId,
+      title: "Mon Parcours d'Auto-perfectionnement",
+      objective: defaultGoal,
+      creator_id: currentUser.uid,
+      created_at: serverTimestamp(),
+    };
+
+    try {
+      await setDoc(doc(db, "personal_paths", pathId), newPath);
+
+      const defaultSteps = [
+        { title: "Étape 1 : Le trait et la main", description: "Exercez-vous à tracer des lignes droites, des courbes fluides et des cercles sans lever le poignet pour acquérir de l'assurance." },
+        { title: "Étape 2 : Les valeurs et les ombres", description: "Étudiez le clair-obscur en réalisant un dégradé du blanc au noir le plus dense pour donner du volume." },
+        { title: "Étape 3 : Les proportions et volumes", description: "Décomposez un objet complexe en formes géométriques simples (cube, sphère, cylindre)." },
+      ];
+      for (let i = 0; i < defaultSteps.length; i++) {
+        const s = defaultSteps[i];
+        const stepId = `step-${pathId}-${i + 1}`;
+        const newStep: PersonalStep = {
+          id: stepId,
+          path_id: pathId,
+          orderIndex: i + 1,
+          title: s.title,
+          description: s.description,
+          reference_image_url: null,
+        };
+        await setDoc(doc(db, "personal_steps", stepId), newStep);
+      }
+
+      setPersonalPaths((prev) => [newPath, ...prev]);
+      setActivePersonalPath(newPath);
+      setShowCreatePathModal(false);
+    } catch (err) {
+      console.error("Error creating quick personal path:", err);
+      alert("Erreur lors de la création du parcours.");
+    }
+  };
+
+  const handleUpdatePersonalPath = async () => {
+    if (!activePersonalPath || !currentUser) return;
+    const newTitle = editPathTitleInput.trim();
+    const newObj = editPathObjectiveInput.trim();
+    if (!newTitle || !newObj) return;
+    try {
+      await updateDoc(doc(db, "personal_paths", activePersonalPath.id), {
+        title: newTitle,
+        objective: newObj,
+      });
+      const updated = { ...activePersonalPath, title: newTitle, objective: newObj };
+      setActivePersonalPath(updated);
+      setPersonalPaths((prev) => prev.map((p) => p.id === updated.id ? updated : p));
+      setEditingPersonalPath(false);
+    } catch (err) {
+      console.error("Error updating personal path:", err);
+      alert("Erreur lors de la mise à jour du parcours.");
+    }
+  };
+
+  const handleGeneratePersonalPathAI = async () => {
+    if (!currentUser) return;
+    const goalToUse = pathGoalInput.trim() || "Apprendre les bases du dessin, des proportions et de l'observation";
+    setIsGeneratingPath(true);
+    setPathError(null);
+    try {
+      let apiKey = import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem("artguard_gemini_key");
+      if (!apiKey) {
+        apiKey = prompt("Veuillez entrer votre clé API Gemini pour générer le parcours :") || "";
+        if (apiKey) {
+          localStorage.setItem("artguard_gemini_key", apiKey);
+        } else {
+          // Fallback default steps without AI key if user clicks cancel
+          const pathId = `path-${Date.now()}`;
+          const newPath: PersonalPath = {
+            id: pathId,
+            title: pathTitleInput.trim() || goalToUse,
+            objective: goalToUse,
+            creator_id: currentUser.uid,
+            created_at: serverTimestamp(),
+          };
+          await setDoc(doc(db, "personal_paths", pathId), newPath);
+
+          const defaultSteps = [
+            { title: "Étape 1 : Le trait et la main", description: "Exercez-vous à tracer des lignes droites, des courbes fluides et des cercles sans lever le poignet." },
+            { title: "Étape 2 : Les valeurs et les ombres", description: "Étudiez le clair-obscur en réalisant un dégradé du blanc au noir le plus dense." },
+            { title: "Étape 3 : Les proportions et volumes", description: "Décomposez un objet complexe en formes géométriques simples (cube, sphère, cylindre)." },
+          ];
+          for (let i = 0; i < defaultSteps.length; i++) {
+            const s = defaultSteps[i];
+            const stepId = `step-${pathId}-${i + 1}`;
+            const newStep: PersonalStep = {
+              id: stepId,
+              path_id: pathId,
+              orderIndex: i + 1,
+              title: s.title,
+              description: s.description,
+              reference_image_url: null,
+            };
+            await setDoc(doc(db, "personal_steps", stepId), newStep);
+          }
+
+          setPersonalPaths((prev) => [newPath, ...prev]);
+          setActivePersonalPath(newPath);
+          setShowCreatePathModal(false);
+          setPathGoalInput("");
+          setPathTitleInput("");
+          setIsGeneratingPath(false);
+          return;
+        }
+      }
+
+      const generated = await generatePersonalPathClientSide(apiKey, goalToUse);
+      const pathId = `path-${Date.now()}`;
+      const newPath: PersonalPath = {
+        id: pathId,
+        title: pathTitleInput.trim() || goalToUse,
+        objective: generated.objective || goalToUse,
+        creator_id: currentUser.uid,
+        created_at: serverTimestamp(),
+      };
+
+      await setDoc(doc(db, "personal_paths", pathId), newPath);
+
+      for (let i = 0; i < generated.steps.length; i++) {
+        const s = generated.steps[i];
+        const stepId = `step-${pathId}-${i + 1}`;
+        const newStep: PersonalStep = {
+          id: stepId,
+          path_id: pathId,
+          orderIndex: i + 1,
+          title: s.title,
+          description: s.description,
+          reference_image_url: null,
+        };
+        await setDoc(doc(db, "personal_steps", stepId), newStep);
+      }
+
+      setPersonalPaths((prev) => [newPath, ...prev]);
+      setActivePersonalPath(newPath);
+      setShowCreatePathModal(false);
+      setPathGoalInput("");
+      setPathTitleInput("");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Erreur de génération.";
+      setPathError(msg);
+      alert(msg);
+    } finally {
+      setIsGeneratingPath(false);
+    }
+  };
+
+  const handleSubmitPersonalAttempt = async () => {
+    if (!currentUser || !activePersonalPath || personalSteps.length === 0) return;
+    const activeStep = personalSteps[activePersonalStepIndex];
+    if (!activeStep) return;
+
+    let drawingUrl = importedImageUrl;
+    if (!drawingUrl && canvasRef.current) {
+      drawingUrl = canvasRef.current.toDataURL("image/webp", 0.75);
+    }
+    if (!drawingUrl) {
+      alert("Veuillez dessiner ou importer une image pour soumettre votre essai.");
+      return;
+    }
+
+    setIsAnalyzingPathAttempt(true);
+    setPathAttemptError(null);
+
+    try {
+      let apiKey = import.meta.env.VITE_GEMINI_API_KEY || localStorage.getItem("artguard_gemini_key");
+      if (!apiKey) {
+        apiKey = prompt("Veuillez entrer votre clé API Gemini pour l'analyse :") || "";
+        if (apiKey) {
+          localStorage.setItem("artguard_gemini_key", apiKey);
+        } else {
+          throw new Error("Clé API Gemini requise.");
+        }
+      }
+
+      const stepAttempts = personalAttemptsMap[activeStep.id] || [];
+      const prevAttempt = stepAttempts[0];
+
+      const feedback = await analyzePathAttemptClientSide(apiKey, {
+        drawing_url: drawingUrl,
+        reference_image_url: activeStep.reference_image_url,
+        path_objective: activePersonalPath.objective,
+        step_title: activeStep.title,
+        step_description: activeStep.description,
+        creation_type: pathCreationType,
+        medium: pathCreationType === "traditionnel" ? pathMediumInput : "Dessin numérique",
+        support: pathCreationType === "traditionnel" ? pathSupportInput : "Écran / Canvas numérique",
+        intention: pathIntentionInput,
+        level: pathLevelInput,
+        previous_attempts_count: stepAttempts.length,
+        previous_feedback: prevAttempt?.ai_feedback?.encouragement,
+      });
+
+      const attemptId = `attempt-${Date.now()}`;
+      const newAttempt: PersonalAttempt = {
+        id: attemptId,
+        path_id: activePersonalPath.id,
+        step_id: activeStep.id,
+        user_id: currentUser.uid,
+        image_url: drawingUrl,
+        medium: pathCreationType === "traditionnel" ? pathMediumInput : "Dessin numérique",
+        support: pathCreationType === "traditionnel" ? pathSupportInput : "Écran / Canvas numérique",
+        intention: pathIntentionInput,
+        level: pathLevelInput,
+        ai_feedback: feedback,
+        is_validated: false,
+        created_at: new Date(),
+      };
+
+      await setDoc(doc(db, "personal_attempts", attemptId), {
+        ...newAttempt,
+        created_at: serverTimestamp(),
+      });
+
+      setPersonalAttemptsMap((prev) => ({
+        ...prev,
+        [activeStep.id]: [newAttempt, ...(prev[activeStep.id] || [])],
+      }));
+
+      setImportedImageUrl(null);
+      setPathIntentionInput("");
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : "Erreur lors de l'analyse de l'essai.";
+      setPathAttemptError(msg);
+      alert(msg);
+    } finally {
+      setIsAnalyzingPathAttempt(false);
+    }
+  };
+
+  const handleValidatePersonalStep = async (stepId: string) => {
+    const stepAttempts = personalAttemptsMap[stepId] || [];
+    if (stepAttempts.length === 0) {
+      alert("Veuillez soumettre au moins un essai avant de valider l'étape.");
+      return;
+    }
+    const latestAttempt = stepAttempts[0];
+    try {
+      await updateDoc(doc(db, "personal_attempts", latestAttempt.id), { is_validated: true });
+      setPersonalAttemptsMap((prev) => ({
+        ...prev,
+        [stepId]: prev[stepId].map((att) => att.id === latestAttempt.id ? { ...att, is_validated: true } : att),
+      }));
+
+      if (activePersonalStepIndex < personalSteps.length - 1) {
+        setActivePersonalStepIndex(activePersonalStepIndex + 1);
+      }
+    } catch (err) {
+      console.error("Error validating step:", err);
+    }
+  };
 
   const handleRequestAiAnalysis = async () => {
     const sub = userSubmissionsMap[activePrompt.id];
@@ -642,6 +1138,22 @@ export function App() {
     }
   };
 
+  const handleUpdateChallengeTitle = async () => {
+    if (!activeChallenge || !currentUser || currentUser.uid !== activeChallenge.creator_id) return;
+    const newTitle = challengeTitleInput.trim();
+    if (!newTitle) return;
+    try {
+      await updateDoc(doc(db, "challenges", activeChallenge.id), { title: newTitle });
+      const updated = { ...activeChallenge, title: newTitle };
+      setActiveChallenge(updated);
+      setChallenges((prev) => prev.map((c) => c.id === activeChallenge.id ? updated : c));
+      setEditingChallengeTitle(false);
+    } catch (err) {
+      console.error("Error updating challenge title:", err);
+      alert("Erreur lors de la mise à jour du titre du challenge.");
+    }
+  };
+
   // Initialize Auth & Load Challenges
   useEffect(() => {
     const unsub = onAuthStateChanged(auth, async (user) => {
@@ -664,6 +1176,7 @@ export function App() {
         }
         setUserProfile(profileData);
         await loadChallenges();
+        await loadPersonalPaths();
       }
       setAuthLoading(false);
     });
@@ -1379,6 +1892,570 @@ export function App() {
     );
   }
 
+  // If activePersonalPath is selected, show Personal Path Workspace
+  if (activePersonalPath) {
+    const activeStep = personalSteps[activePersonalStepIndex];
+    const stepAttempts = activeStep ? (personalAttemptsMap[activeStep.id] || []) : [];
+    const hasValidatedCurrentStep = stepAttempts.some((att) => att.is_validated);
+
+    return (
+      <div className="min-h-screen flex flex-col bg-[#FAF8F5] text-stone-900">
+        <header className="flex items-center justify-between px-6 lg:px-10 py-4 bg-[#FAF8F5]/95 backdrop-blur-sm border-b border-stone-200">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setActivePersonalPath(null)}
+              className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-xl cursor-pointer"
+            >
+              ← Tableau de bord
+            </button>
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-base font-bold text-stone-900">{activePersonalPath.title}</h2>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditPathTitleInput(activePersonalPath.title);
+                    setEditPathObjectiveInput(activePersonalPath.objective);
+                    setEditingPersonalPath(true);
+                  }}
+                  className="p-1 text-stone-500 hover:text-stone-900 rounded cursor-pointer"
+                  title="Modifier le titre et l'objectif du parcours"
+                >
+                  <Edit3 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+              <p className="text-[11px] text-stone-500">Parcours Personnel (Challenge Solo / Auto-perfectionnement)</p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="inline-flex items-center gap-1 px-3 py-1 bg-emerald-100 text-emerald-800 text-[11px] font-medium rounded-full">
+              🔒 Espace strictement privé
+            </span>
+          </div>
+        </header>
+
+        <main className="flex-1 w-full max-w-[1200px] mx-auto px-6 py-8 space-y-8">
+          {/* Objective Banner */}
+          <div className="p-6 bg-amber-50 border border-amber-200 rounded-2xl shadow-xs space-y-2">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-xs font-bold text-amber-900 uppercase tracking-wide">
+                <Sparkles className="w-4 h-4 text-amber-700" />
+                Objectif Global du Parcours
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setEditPathTitleInput(activePersonalPath.title);
+                  setEditPathObjectiveInput(activePersonalPath.objective);
+                  setEditingPersonalPath(true);
+                }}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-amber-900 bg-amber-100 hover:bg-amber-200 rounded-lg cursor-pointer transition-colors shadow-xs"
+              >
+                <Edit3 className="w-3.5 h-3.5" />
+                Modifier le parcours
+              </button>
+            </div>
+            <p className="text-sm sm:text-base font-semibold text-stone-900">
+              {activePersonalPath.objective}
+            </p>
+          </div>
+
+          {/* Steps Timeline */}
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-xs font-semibold text-stone-700 uppercase tracking-wide">Progression dans le parcours</h3>
+              <button
+                type="button"
+                onClick={handleAddPersonalStep}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-amber-900 bg-amber-100 hover:bg-amber-200 rounded-lg cursor-pointer transition-colors shadow-xs"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                Ajouter une étape
+              </button>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+              {personalSteps.map((step, idx) => {
+                const sAttempts = personalAttemptsMap[step.id] || [];
+                const isValidated = sAttempts.some((a) => a.is_validated);
+                const isUnlocked = idx === 0 || personalAttemptsMap[personalSteps[idx - 1]?.id]?.some((a) => a.is_validated);
+                const isActive = idx === activePersonalStepIndex;
+
+                return (
+                  <div
+                    key={step.id}
+                    className={`p-3.5 rounded-xl border text-left transition-all flex flex-col justify-between gap-3 relative overflow-hidden ${
+                      isActive
+                        ? "border-amber-900 bg-amber-50/70 ring-2 ring-amber-900/20 shadow-xs"
+                        : isValidated
+                          ? "border-emerald-200 bg-emerald-50/40 hover:bg-emerald-50"
+                          : isUnlocked
+                            ? "border-stone-200 bg-white hover:border-stone-300"
+                            : "border-stone-200 bg-stone-100 opacity-60 cursor-not-allowed"
+                    }`}
+                  >
+                    <div 
+                      onClick={() => { if (isUnlocked) setActivePersonalStepIndex(idx); }}
+                      className="cursor-pointer space-y-1 flex-1"
+                    >
+                      <div className="flex items-center justify-between text-[11px] text-stone-500">
+                        <span className="font-mono font-bold">Étape 0{idx + 1}</span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingStep(step);
+                              setEditStepTitle(step.title);
+                              setEditStepDesc(step.description);
+                            }}
+                            className="p-1 text-stone-400 hover:text-amber-900 rounded cursor-pointer"
+                            title="Modifier cette étape"
+                          >
+                            <Edit3 className="w-3 h-3" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              handleDeletePersonalStep(step.id);
+                            }}
+                            className="p-1 text-stone-400 hover:text-red-600 rounded cursor-pointer"
+                            title="Supprimer cette étape"
+                          >
+                            <Trash2 className="w-3 h-3" />
+                          </button>
+                          {isValidated ? (
+                            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700" />
+                          ) : isUnlocked ? (
+                            <Unlock className="w-3.5 h-3.5 text-stone-600" />
+                          ) : (
+                            <Lock className="w-3.5 h-3.5 text-stone-400" />
+                          )}
+                        </div>
+                      </div>
+                      <p className="text-xs font-semibold text-stone-900 line-clamp-2">{step.title}</p>
+                    </div>
+                    <div className="text-[10px] font-mono text-stone-500 pt-1 border-t border-stone-200/60 flex items-center justify-between">
+                      <span>{sAttempts.length} essai(s)</span>
+                      <span>{isValidated ? "Validée" : isActive ? "En cours" : "Déverrouillée"}</span>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Active Step Details & Workspace */}
+          {activeStep && (
+            <div className="bg-white border border-stone-200 rounded-2xl p-6 sm:p-8 space-y-6 shadow-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-stone-100">
+                <div>
+                  <span className="text-xs font-semibold text-amber-800 uppercase tracking-wide">
+                    Étape 0{activePersonalStepIndex + 1} sur {personalSteps.length}
+                  </span>
+                  <h2 className="text-2xl font-bold text-stone-900 mt-1">{activeStep.title}</h2>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setEditingStep(activeStep);
+                      setEditStepTitle(activeStep.title);
+                      setEditStepDesc(activeStep.description);
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-xl cursor-pointer shadow-xs"
+                  >
+                    <Edit3 className="w-3.5 h-3.5 text-amber-800" />
+                    Modifier l'étape
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleDeletePersonalStep(activeStep.id)}
+                    className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-red-700 bg-red-50 border border-red-200 hover:bg-red-100 rounded-xl cursor-pointer shadow-xs"
+                    title="Supprimer cette étape"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                    Supprimer
+                  </button>
+
+                  {hasValidatedCurrentStep ? (
+                    <span className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-bold bg-emerald-100 text-emerald-800 rounded-xl">
+                      <CheckCircle2 className="w-4 h-4 text-emerald-700" />
+                      Étape validée
+                    </span>
+                  ) : stepAttempts.length > 0 ? (
+                    <button
+                      type="button"
+                      onClick={() => handleValidatePersonalStep(activeStep.id)}
+                      className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-emerald-800 hover:bg-emerald-900 rounded-xl cursor-pointer shadow-sm transition-colors"
+                    >
+                      <ShieldCheck className="w-4 h-4" />
+                      Valider et continuer
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              {/* Detailed Explanatory Text */}
+              <div className="p-4 bg-stone-50 border border-stone-200 rounded-xl space-y-2">
+                <h4 className="text-xs font-bold text-stone-900 uppercase tracking-wide">Consignes pédagogiques & Explications</h4>
+                <p className="text-xs sm:text-sm text-stone-700 leading-relaxed whitespace-pre-line">
+                  {activeStep.description}
+                </p>
+              </div>
+
+              {/* Optional Reference Image / Model */}
+              {activeStep.reference_image_url && (
+                <div className="space-y-2">
+                  <span className="text-xs font-bold text-stone-800 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-700" />
+                    Modèle / Image de référence de l'étape
+                  </span>
+                  <div className="rounded-xl border border-stone-300 overflow-hidden bg-[#FAF8F5] max-w-sm aspect-[4/3] flex items-center justify-center p-2">
+                    <img src={activeStep.reference_image_url} alt="Référence pédagogique" className="max-h-full max-w-full object-contain rounded" />
+                  </div>
+                </div>
+              )}
+
+              {/* Upload Workspace (Exclusive photo upload, no digital canvas) */}
+              <div className="space-y-4 pt-4 border-t border-stone-100">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <h3 className="text-sm font-bold text-stone-900">Soumettre un nouvel essai (Import photo)</h3>
+                  <div className="flex items-center gap-2">
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => fileInputRef.current?.click()}
+                      className="inline-flex items-center gap-1.5 px-3 py-2 text-xs font-medium text-stone-700 bg-white border border-stone-300 hover:bg-stone-50 rounded-lg cursor-pointer shadow-xs"
+                    >
+                      <Upload className="w-3.5 h-3.5 text-amber-800" />
+                      {importedImageUrl ? "Changer la photo" : "Importer une photo"}
+                    </button>
+                  </div>
+                </div>
+
+                {importedImageUrl ? (
+                  <div className="space-y-3">
+                    <div className="rounded-xl border border-stone-300 overflow-hidden bg-[#FAF8F5] aspect-[16/10] flex items-center justify-center p-2 max-w-xl mx-auto shadow-sm">
+                      <img src={importedImageUrl} alt="Aperçu importé" className="max-h-full max-w-full object-contain rounded" />
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    onClick={() => fileInputRef.current?.click()}
+                    className="p-12 border-2 border-dashed border-stone-300 rounded-2xl text-center space-y-3 bg-stone-50 hover:bg-stone-100 transition-colors cursor-pointer"
+                  >
+                    <Upload className="w-10 h-10 text-amber-800 mx-auto" />
+                    <div className="space-y-1">
+                      <h4 className="text-sm font-semibold text-stone-900">Importez la photo de votre dessin</h4>
+                      <p className="text-xs text-stone-500">Cliquez ici pour sélectionner une photo de votre réalisation (PNG, JPG, WEBP).</p>
+                    </div>
+                    <button
+                      type="button"
+                      className="px-4 py-2 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer shadow-sm"
+                    >
+                      Sélectionner une photo
+                    </button>
+                  </div>
+                )}
+
+                {/* Submission Form Parameters */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4 pt-2">
+                  <div>
+                    <label className="block text-xs font-medium text-stone-700 mb-1">Type de création</label>
+                    <select
+                      value={pathCreationType}
+                      onChange={(e) => setPathCreationType(e.target.value as any)}
+                      className="w-full px-3 py-2 text-xs border border-stone-300 rounded-xl bg-stone-50 focus:outline-none"
+                    >
+                      <option value="numérique">Dessin numérique (Canvas)</option>
+                      <option value="traditionnel">Dessin traditionnel (Import)</option>
+                    </select>
+                  </div>
+                  {pathCreationType === "traditionnel" && (
+                    <>
+                      <div>
+                        <label className="block text-xs font-medium text-stone-700 mb-1">Médium</label>
+                        <select
+                          value={pathMediumInput}
+                          onChange={(e) => setPathMediumInput(e.target.value)}
+                          className="w-full px-3 py-2 text-xs border border-stone-300 rounded-xl bg-stone-50 focus:outline-none"
+                        >
+                          <option value="Crayon à papier">Crayon à papier</option>
+                          <option value="Stylo bille/Ancre">Stylo bille / Encre</option>
+                          <option value="Feutre">Feutre</option>
+                          <option value="Peinture">Peinture</option>
+                          <option value="Fusain">Fusain</option>
+                          <option value="Autre">Autre</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-xs font-medium text-stone-700 mb-1">Support</label>
+                        <select
+                          value={pathSupportInput}
+                          onChange={(e) => setPathSupportInput(e.target.value)}
+                          className="w-full px-3 py-2 text-xs border border-stone-300 rounded-xl bg-stone-50 focus:outline-none"
+                        >
+                          <option value="Papier blanc">Papier blanc</option>
+                          <option value="Papier grain/croquis">Papier grain / croquis</option>
+                          <option value="Papier quadrillé/ligné">Papier quadrillé / ligné</option>
+                          <option value="Autre">Autre</option>
+                        </select>
+                      </div>
+                    </>
+                  )}
+                  <div>
+                    <label className="block text-xs font-medium text-stone-700 mb-1">Intention / Objectif</label>
+                    <input
+                      type="text"
+                      value={pathIntentionInput}
+                      onChange={(e) => setPathIntentionInput(e.target.value)}
+                      placeholder="Ex: Travailler les ombres..."
+                      className="w-full px-3 py-2 text-xs border border-stone-300 rounded-xl bg-stone-50 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-medium text-stone-700 mb-1">Niveau</label>
+                    <select
+                      value={pathLevelInput}
+                      onChange={(e) => setPathLevelInput(e.target.value)}
+                      className="w-full px-3 py-2 text-xs border border-stone-300 rounded-xl bg-stone-50 focus:outline-none"
+                    >
+                      <option value="Débutant">Débutant</option>
+                      <option value="Intermédiaire">Intermédiaire</option>
+                      <option value="Avancé">Avancé</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="pt-2 flex justify-end">
+                  <button
+                    type="button"
+                    disabled={isAnalyzingPathAttempt}
+                    onClick={handleSubmitPersonalAttempt}
+                    className="inline-flex items-center gap-2 px-6 py-3 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer shadow-md disabled:opacity-50"
+                  >
+                    <Sparkles className="w-4 h-4 text-amber-200" />
+                    {isAnalyzingPathAttempt ? "Analyse comparative IA en cours..." : "Soumettre l'essai & Analyse IA"}
+                  </button>
+                </div>
+              </div>
+
+              {/* History of Attempts & AI Feedback */}
+              <div className="space-y-4 pt-6 border-t border-stone-200">
+                <h3 className="text-base font-bold text-stone-900">
+                  Historique de vos essais sur cette étape ({stepAttempts.length})
+                </h3>
+
+                {stepAttempts.length === 0 ? (
+                  <p className="text-xs text-stone-500 italic">Aucun essai soumis pour cette étape pour l'instant.</p>
+                ) : (
+                  <div className="space-y-6">
+                    {stepAttempts.map((att, attIdx) => (
+                      <div key={att.id} className="p-5 bg-stone-50 border border-stone-200 rounded-xl space-y-4 shadow-xs">
+                        <div className="flex items-center justify-between text-xs text-stone-500 pb-2 border-b border-stone-200/60">
+                          <span className="font-mono font-bold text-amber-900">Essai #{stepAttempts.length - attIdx}</span>
+                          <span className="font-mono">{att.created_at?.toDate ? att.created_at.toDate().toLocaleString() : "Récemment"}</span>
+                          {att.is_validated && (
+                            <span className="px-2 py-0.5 bg-emerald-100 text-emerald-800 font-bold rounded text-[10px]">Validé</span>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                          <div className="rounded-lg border border-stone-300 overflow-hidden bg-white aspect-[4/3] flex items-center justify-center p-1">
+                            <img src={att.image_url} alt="Essai soumis" className="max-h-full max-w-full object-contain rounded cursor-pointer" onClick={() => setLightboxImageUrl(att.image_url)} />
+                          </div>
+
+                          <div className="md:col-span-2 space-y-3">
+                            {att.ai_feedback && (
+                              <div className="p-4 bg-amber-50/70 border border-amber-200 rounded-xl space-y-3">
+                                <div className="flex items-center gap-2 text-amber-900 font-bold text-xs uppercase tracking-wide">
+                                  <Sparkles className="w-4 h-4 text-amber-700" />
+                                  Retour et Conseils IA (Gemini Vision)
+                                </div>
+                                <p className="text-xs text-stone-700 italic bg-white p-3 rounded-lg border border-amber-100">
+                                  "{att.ai_feedback.encouragement}"
+                                </p>
+                                <div className="space-y-1">
+                                  <span className="text-[11px] font-bold text-stone-900 block">Pistes d'amélioration :</span>
+                                  <ul className="list-disc list-inside text-xs text-stone-700 space-y-1">
+                                    {att.ai_feedback.tips?.map((tip, idx) => (
+                                      <li key={idx} className="leading-relaxed">{tip}</li>
+                                    ))}
+                                  </ul>
+                                </div>
+                                {att.ai_feedback.progress_comparison && (
+                                  <div className="pt-2 border-t border-amber-200/60 text-xs text-stone-700 space-y-1">
+                                    <span className="font-bold text-stone-900 block">Évolution / Comparaison :</span>
+                                    <p className="leading-relaxed">{att.ai_feedback.progress_comparison}</p>
+                                  </div>
+                                )}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+        </main>
+
+        {/* Edit Personal Step Modal */}
+        {editingStep && (
+          <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white border border-stone-200 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-xl overflow-y-auto max-h-[90vh]">
+              <div className="flex items-center justify-between pb-3 border-b border-stone-100">
+                <div className="flex items-center gap-2">
+                  <Edit3 className="w-5 h-5 text-amber-800" />
+                  <h3 className="text-base font-bold text-stone-900">Modifier l'étape</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingStep(null)}
+                  className="p-1 text-stone-500 hover:text-stone-900 rounded-lg cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-4 text-xs">
+                <div>
+                  <label className="block font-medium text-stone-700 mb-1">Titre de l'étape *</label>
+                  <input
+                    type="text"
+                    value={editStepTitle}
+                    onChange={(e) => setEditStepTitle(e.target.value)}
+                    className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-stone-700 mb-1">Consignes / Description détaillée *</label>
+                  <textarea
+                    value={editStepDesc}
+                    onChange={(e) => setEditStepDesc(e.target.value)}
+                    rows={4}
+                    className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-stone-700 mb-1">Image de référence / modèle de l'étape (optionnel)</label>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={(e) => handleUploadStepReference(editingStep.id, e)}
+                      className="text-xs text-stone-500 file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-amber-100 file:text-amber-900 hover:file:bg-amber-200 cursor-pointer"
+                    />
+                  </div>
+                  {editingStep.reference_image_url && (
+                    <div className="mt-2 w-32 h-24 rounded-lg overflow-hidden border border-stone-200">
+                      <img src={editingStep.reference_image_url} alt="Référence" className="w-full h-full object-cover" />
+                    </div>
+                  )}
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleSavePersonalStep}
+                    className="flex-1 py-2.5 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer"
+                  >
+                    Enregistrer les modifications
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingStep(null)}
+                    className="px-4 py-2.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded-xl cursor-pointer"
+                  >
+                    Annuler
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Edit Personal Path Title & Objective Modal */}
+        {editingPersonalPath && (
+          <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white border border-stone-200 rounded-2xl max-w-lg w-full p-6 space-y-5 shadow-xl overflow-y-auto max-h-[90vh]">
+              <div className="flex items-center justify-between pb-3 border-b border-stone-100">
+                <div className="flex items-center gap-2">
+                  <Edit3 className="w-5 h-5 text-amber-800" />
+                  <h3 className="text-base font-bold text-stone-900">Modifier le parcours personnel</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setEditingPersonalPath(false)}
+                  className="p-1 text-stone-500 hover:text-stone-900 rounded-lg cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-4 text-xs">
+                <div>
+                  <label className="block font-medium text-stone-700 mb-1">Titre du parcours *</label>
+                  <input
+                    type="text"
+                    required
+                    value={editPathTitleInput}
+                    onChange={(e) => setEditPathTitleInput(e.target.value)}
+                    className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-stone-700 mb-1">Objectif global ou description *</label>
+                  <textarea
+                    required
+                    rows={3}
+                    value={editPathObjectiveInput}
+                    onChange={(e) => setEditPathObjectiveInput(e.target.value)}
+                    className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                  />
+                </div>
+
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={handleUpdatePersonalPath}
+                    className="flex-1 py-2.5 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer"
+                  >
+                    Enregistrer les modifications
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setEditingPersonalPath(false)}
+                    className="px-4 py-2.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded-xl cursor-pointer"
+                  >
+                    Annuler
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+      </div>
+    );
+  }
+
   // If no active challenge selected, show Challenge Dashboard
   if (!activeChallenge) {
     const myChallenges = challenges.filter((c) => c.creator_id === currentUser.uid);
@@ -1393,7 +2470,7 @@ export function App() {
       <div className="min-h-screen flex flex-col bg-[#FAF8F5] text-stone-900">
         <header className="flex items-center justify-between px-6 lg:px-10 py-4 bg-[#FAF8F5]/95 backdrop-blur-sm border-b border-stone-200">
           <div className="text-xl font-bold tracking-tight text-stone-900 font-display">
-            ArtGuard AI <span className="text-xs font-normal text-stone-500">· Tableau de bord des Challenges</span>
+            ArtGuard AI <span className="text-xs font-normal text-stone-500">· Tableau de bord des Challenges & Parcours</span>
           </div>
 
           <div className="flex items-center gap-3">
@@ -1416,11 +2493,19 @@ export function App() {
           {/* Header & Actions */}
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 border-b border-stone-200">
             <div>
-              <h1 className="text-3xl font-bold text-stone-900 tracking-tight">Choisissez ou créez un Challenge</h1>
-              <p className="text-sm text-stone-600 mt-1">Rejoignez un atelier public, entrez un code secret ou lancez votre propre challenge.</p>
+              <h1 className="text-3xl font-bold text-stone-900 tracking-tight">Tableau de bord de l'artiste</h1>
+              <p className="text-sm text-stone-600 mt-1">Gérez vos challenges collectifs ou créez votre parcours d'auto-perfectionnement (Solo).</p>
             </div>
 
             <div className="flex items-center gap-3">
+              <button
+                type="button"
+                onClick={() => setShowCreatePathModal(true)}
+                className="inline-flex items-center gap-2 px-4 py-2.5 text-xs font-semibold text-stone-800 bg-amber-100 hover:bg-amber-200 rounded-xl shadow-sm cursor-pointer transition-colors"
+              >
+                <Sparkles className="w-4 h-4 text-amber-800" />
+                Créer un parcours personnel (Solo)
+              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -1434,6 +2519,61 @@ export function App() {
                 Créer un challenge
               </button>
             </div>
+          </div>
+
+          {/* Personal Paths Section */}
+          <div className="space-y-4">
+            <h2 className="text-lg font-bold text-stone-900 flex items-center gap-2">
+              <Compass className="w-5 h-5 text-amber-800" />
+              Vos Parcours Personnels de Travail (Challenge Solo / Auto-perfectionnement)
+            </h2>
+            {personalPaths.length === 0 ? (
+              <div className="p-8 bg-white border border-stone-200 rounded-2xl text-center space-y-3">
+                <p className="text-xs text-stone-600">Aucun parcours personnel créé pour l'instant. Lancez votre premier parcours guidé par IA ou créez-le en un clic !</p>
+                <div className="flex items-center justify-center gap-3">
+                  <button
+                    type="button"
+                    onClick={handleQuickCreatePersonalPath}
+                    className="px-4 py-2 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer shadow-sm"
+                  >
+                    Créer mon premier parcours personnel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowCreatePathModal(true)}
+                    className="px-4 py-2 text-xs font-semibold text-stone-800 bg-amber-100 hover:bg-amber-200 rounded-xl cursor-pointer"
+                  >
+                    Personnaliser avec l'IA
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {personalPaths.map((path) => (
+                  <div
+                    key={path.id}
+                    onClick={() => setActivePersonalPath(path)}
+                    className="p-6 bg-white border border-amber-300 rounded-2xl shadow-xs hover:shadow-md transition-all cursor-pointer flex flex-col justify-between space-y-4 group"
+                  >
+                    <div className="space-y-2">
+                      <span className="px-2.5 py-1 text-[10px] font-mono font-bold bg-amber-100 text-amber-900 rounded-full">
+                        Parcours Solo 🔒
+                      </span>
+                      <h3 className="text-base font-bold text-stone-900 group-hover:text-amber-950 transition-colors">
+                        {path.title}
+                      </h3>
+                      <p className="text-xs text-stone-600 line-clamp-2 leading-relaxed">
+                        🎯 {path.objective}
+                      </p>
+                    </div>
+                    <div className="pt-3 border-t border-stone-100 flex items-center justify-between text-xs font-semibold text-amber-900">
+                      <span>Ouvrir l'espace d'entraînement</span>
+                      <span>→</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Join Private Challenge Bar */}
@@ -1781,6 +2921,76 @@ export function App() {
           </div>
         )}
 
+        {/* Create Personal Path Modal */}
+        {showCreatePathModal && (
+          <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+            <div className="bg-white border border-stone-200 rounded-2xl max-w-lg w-full p-6 space-y-6 shadow-xl overflow-y-auto max-h-[90vh]">
+              <div className="flex items-center justify-between pb-3 border-b border-stone-100">
+                <div className="flex items-center gap-2">
+                  <Compass className="w-5 h-5 text-amber-800" />
+                  <h3 className="text-base font-bold text-stone-900">Créer un Parcours Personnel (IA ou Manuel)</h3>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowCreatePathModal(false)}
+                  className="p-1 text-stone-500 hover:text-stone-900 rounded-lg cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="space-y-4 text-xs">
+                <div>
+                  <label className="block font-medium text-stone-700 mb-1">Titre du parcours (optionnel)</label>
+                  <input
+                    type="text"
+                    value={pathTitleInput}
+                    onChange={(e) => setPathTitleInput(e.target.value)}
+                    placeholder="Ex: Maîtriser le portrait réaliste"
+                    className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                  />
+                </div>
+
+                <div>
+                  <label className="block font-medium text-stone-700 mb-1">Objectif global ou sujet d'apprentissage</label>
+                  <textarea
+                    value={pathGoalInput}
+                    onChange={(e) => setPathGoalInput(e.target.value)}
+                    rows={3}
+                    placeholder="Ex: Je veux apprendre à dessiner les proportions du visage, les yeux réalistes et les expressions."
+                    className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                  />
+                </div>
+
+                {pathError && (
+                  <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-red-800 text-xs">
+                    {pathError}
+                  </div>
+                )}
+
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    type="button"
+                    disabled={isGeneratingPath}
+                    onClick={handleGeneratePersonalPathAI}
+                    className="flex-1 py-2.5 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+                  >
+                    <Sparkles className="w-4 h-4 text-amber-200" />
+                    {isGeneratingPath ? "Génération du parcours par IA..." : "Générer le parcours par IA"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowCreatePathModal(false)}
+                    className="px-4 py-2.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded-xl cursor-pointer"
+                  >
+                    Annuler
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
       </div>
     );
   }
@@ -1804,9 +3014,26 @@ export function App() {
             ← Challenges
           </button>
 
-          <div className="hidden sm:block">
-            <h2 className="text-sm font-bold text-stone-900">{activeChallenge.title}</h2>
-            <p className="text-[11px] text-stone-500">Par {activeChallenge.creator_name} {isCreator ? "(Vous êtes créateur)" : ""}</p>
+          <div className="hidden sm:flex items-center gap-2">
+            <div>
+              <div className="flex items-center gap-2">
+                <h2 className="text-sm font-bold text-stone-900">{activeChallenge.title}</h2>
+                {isCreator && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChallengeTitleInput(activeChallenge.title);
+                      setEditingChallengeTitle(true);
+                    }}
+                    className="p-1 text-stone-500 hover:text-stone-900 rounded cursor-pointer"
+                    title="Modifier le titre du challenge"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" />
+                  </button>
+                )}
+              </div>
+              <p className="text-[11px] text-stone-500">Par {activeChallenge.creator_name} {isCreator ? "(Vous êtes créateur)" : ""}</p>
+            </div>
           </div>
 
           <div className="flex items-center gap-1 p-1 bg-stone-200 rounded-lg">
@@ -2762,6 +3989,127 @@ export function App() {
                 <button
                   type="button"
                   onClick={() => setShowAiModal(false)}
+                  className="px-4 py-2.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded-xl cursor-pointer"
+                >
+                  Annuler
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Create Personal Path Modal */}
+      {showCreatePathModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-stone-200 rounded-2xl max-w-lg w-full p-6 space-y-6 shadow-xl overflow-y-auto max-h-[90vh]">
+            <div className="flex items-center justify-between pb-3 border-b border-stone-100">
+              <div className="flex items-center gap-2">
+                <Compass className="w-5 h-5 text-amber-800" />
+                <h3 className="text-base font-bold text-stone-900">Créer un Parcours Personnel (IA ou Manuel)</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCreatePathModal(false)}
+                className="p-1 text-stone-500 hover:text-stone-900 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              <div>
+                <label className="block font-medium text-stone-700 mb-1">Titre du parcours (optionnel)</label>
+                <input
+                  type="text"
+                  value={pathTitleInput}
+                  onChange={(e) => setPathTitleInput(e.target.value)}
+                  placeholder="Ex: Maîtriser le portrait réaliste"
+                  className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                />
+              </div>
+
+              <div>
+                <label className="block font-medium text-stone-700 mb-1">Objectif global ou sujet d'apprentissage</label>
+                <textarea
+                  value={pathGoalInput}
+                  onChange={(e) => setPathGoalInput(e.target.value)}
+                  rows={3}
+                  placeholder="Ex: Je veux apprendre à dessiner les proportions du visage, les yeux réalistes et les expressions."
+                  className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                />
+              </div>
+
+              {pathError && (
+                <div className="p-3 bg-red-50 border border-red-200 rounded-xl text-red-800 text-xs">
+                  {pathError}
+                </div>
+              )}
+
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  disabled={isGeneratingPath}
+                  onClick={handleGeneratePersonalPathAI}
+                  className="flex-1 py-2.5 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer disabled:opacity-50 flex items-center justify-center gap-2"
+                >
+                  <Sparkles className="w-4 h-4 text-amber-200" />
+                  {isGeneratingPath ? "Génération du parcours par IA..." : "Générer le parcours par IA"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setShowCreatePathModal(false)}
+                  className="px-4 py-2.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded-xl cursor-pointer"
+                >
+                  Annuler
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Challenge Title Modal */}
+      {editingChallengeTitle && (
+        <div className="fixed inset-0 z-50 bg-black/50 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white border border-stone-200 rounded-2xl max-w-md w-full p-6 space-y-5 shadow-xl">
+            <div className="flex items-center justify-between pb-3 border-b border-stone-100">
+              <div className="flex items-center gap-2">
+                <Edit3 className="w-5 h-5 text-amber-800" />
+                <h3 className="text-base font-bold text-stone-900">Modifier le titre du challenge</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingChallengeTitle(false)}
+                className="p-1 text-stone-500 hover:text-stone-900 rounded-lg cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              <div>
+                <label className="block font-medium text-stone-700 mb-1">Nouveau titre du challenge *</label>
+                <input
+                  type="text"
+                  required
+                  value={challengeTitleInput}
+                  onChange={(e) => setChallengeTitleInput(e.target.value)}
+                  className="w-full px-3 py-2 border border-stone-300 rounded-xl bg-stone-50 focus:outline-none focus:ring-2 focus:ring-amber-900"
+                />
+              </div>
+
+              <div className="flex items-center gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={handleUpdateChallengeTitle}
+                  className="flex-1 py-2.5 text-xs font-semibold text-white bg-amber-900 hover:bg-amber-950 rounded-xl cursor-pointer"
+                >
+                  Enregistrer
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEditingChallengeTitle(false)}
                   className="px-4 py-2.5 text-xs font-medium text-stone-600 bg-stone-100 hover:bg-stone-200 rounded-xl cursor-pointer"
                 >
                   Annuler
